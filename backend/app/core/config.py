@@ -39,9 +39,11 @@ class Settings(BaseSettings):
 
     # --- Elasticsearch ---
     ES_HOST: str = "http://49.52.27.139:9200"  # 生产地址；本地开发可用 SSH 隧道: http://localhost:19200
-    ES_INDEX_PAPERS: str = "dblp_papers"
+    ES_INDEX_PAPERS: str = "dblp_papers"        # 遗留配置，兼容旧代码
+    ES_ALIAS_PAPERS: str = "dblp_search"         # 蓝绿发布别名，所有查询走此别名
+    ES_INDEX_PREFIX: str = "dblp_index"           # 蓝绿索引前缀，实际索引名: dblp_index_YYYYMMDD
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()

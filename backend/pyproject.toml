@@ -40,6 +40,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "rank-bm25>=0.2",
     "lxml>=5.0",
+    "pdfplumber>=0.11.9",
 ]
 
 [project.optional-dependencies]

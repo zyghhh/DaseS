@@ -17,8 +17,23 @@ class PaperDoc(BaseModel):
     year: int | None = None
     venue: str | None = None      # 期刊名 / 会议名
     url: str | None = None
-    ee: str | None = None         # 电子版链接
+    ee: str | None = None         # 第一个电子版链接（向后兼容）
     pub_type: str = "inproceedings"  # article | inproceedings 等
+    raw_xml: str | None = None    # 完整原始 XML 片段
+    # --- 扩展结构化字段（高频过滤/展示）---
+    pages: str | None = None      # 页码，如 "1877-1901"
+    volume: str | None = None     # 卷号
+    mdate: str | None = None      # 数据最后修改日期，格式 YYYY-MM-DD
+    author_pids: list[str] = []   # DBLP 作者 PID 列表，精确关联查询
+    ee_links: list[str] = []      # 所有电子版链接（含 arXiv 备用链接）
+    school: str | None = None     # 学校（学位论文）
+    publisher: str | None = None  # 出版社
+    # --- 跨源关联标识符（数据融合桥梁）---
+    doi: str | None = None        # DOI，如 10.1016/j.artint.2023.103
+    arxiv_id: str | None = None   # arXiv ID，如 2301.12345
+    # --- 预留：外部 API 补全字段 ---
+    abstract: str | None = None       # 论文摘要
+    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | None
 
 
 class PaperSearchResult(BaseModel):
@@ -33,6 +48,20 @@ class PaperSearchResult(BaseModel):
     pub_type: str
     score: float | None = None    # ES 相关度得分
     highlight: dict[str, list[str]] | None = None  # 命中词高亮片段
+    # --- 扩展字段 ---
+    pages: str | None = None
+    volume: str | None = None
+    mdate: str | None = None
+    author_pids: list[str] = []
+    ee_links: list[str] = []
+    school: str | None = None
+    publisher: str | None = None
+    # --- 跨源关联标识符（数据融合桥梁）---
+    doi: str | None = None        # DOI
+    arxiv_id: str | None = None   # arXiv ID
+    # --- 预留：外部 API 补全字段 ---
+    abstract: str | None = None       # 论文摘要
+    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | None
 
 
 class PaperSearchResponse(BaseModel):

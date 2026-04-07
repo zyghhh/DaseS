@@ -68,6 +68,21 @@ PAPERS_MAPPING: dict = {
             "url":      {"type": "keyword"},
             "ee":       {"type": "keyword"},
             "pub_type": {"type": "keyword"},
+            "raw_xml":  {"type": "text", "index": False},  # 完整原始 XML，不索引不分词
+            # --- 扩展结构化字段（高频过滤/展示）---
+            "pages":       {"type": "keyword"},                           # 页码，如 "1877-1901"
+            "volume":      {"type": "keyword"},                           # 卷号
+            "mdate":       {"type": "date", "format": "yyyy-MM-dd"},      # 数据最后修改日期
+            "author_pids": {"type": "keyword"},                           # DBLP 作者 PID，精确关联
+            "ee_links":    {"type": "keyword"},                           # 所有电子版链接数组
+            "school":      {"type": "keyword"},                           # 学校（学位论文）
+            "publisher":   {"type": "keyword"},                           # 出版社
+            # --- 跨源关联标识符（数据融合桥梁）---
+            "doi":         {"type": "keyword"},                           # DOI，如 10.1016/j.artint.2023.103
+            "arxiv_id":    {"type": "keyword"},                           # arXiv ID，如 2301.12345
+            # --- 预留：外部 API 补全字段 ---
+            "abstract":       {"type": "text", "index": False},             # 论文摘要，外部数据源补全
+            "abstract_source": {"type": "keyword"},                          # 摘要来源：S2AG | ArXiv | None
         }
     },
 }
@@ -103,18 +118,31 @@ async def close_es_client() -> None:
 # 索引管理
 # ---------------------------------------------------------------------------
 
-async def ensure_index() -> None:
-    """若索引不存在则创建，幂等操作"""
+async def ensure_alias() -> None:
+    """确保别名 dblp_search 存在。
+
+    若别名不存在，自动创建一个默认索引并绑定别名，保证应用启动时查询不报错。
+    """
     es = get_es_client()
-    index = settings.ES_INDEX_PAPERS
-    try:
-        await es.indices.get(index=index)
-    except NotFoundError:
-        await es.indices.create(
-            index=index,
-            settings=PAPERS_MAPPING["settings"],
-            mappings=PAPERS_MAPPING["mappings"],
-        )
+    alias = settings.ES_ALIAS_PAPERS
+    exists = await es.indices.exists_alias(name=alias)
+    if not exists:
+        # 别名不存在，创建一个初始索引并绑定
+        init_index = f"{settings.ES_INDEX_PREFIX}_init"
+        try:
+            await es.indices.get(index=init_index)
+        except NotFoundError:
+            await es.indices.create(
+                index=init_index,
+                settings=PAPERS_MAPPING["settings"],
+                mappings=PAPERS_MAPPING["mappings"],
+            )
+        await es.indices.put_alias(index=init_index, name=alias)
+
+
+async def ensure_index() -> None:
+    """向后兼容：确保别名存在（委托给 ensure_alias）"""
+    await ensure_alias()
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +160,7 @@ async def bulk_index_papers(papers: list[PaperDoc]) -> tuple[int, list]:
     """
     await ensure_index()
     es = get_es_client()
-    index = settings.ES_INDEX_PAPERS
+    index = settings.ES_ALIAS_PAPERS   # 统一通过别名写入
 
     actions = [
         {
@@ -182,7 +210,7 @@ async def search_papers(
         PaperSearchResponse 封装的分页结果。
     """
     es = get_es_client()
-    index = settings.ES_INDEX_PAPERS
+    index = settings.ES_ALIAS_PAPERS   # 通过别名查询，支持蓝绿发布无感知切换
 
     must_clauses: list[dict] = []
     filter_clauses: list[dict] = []
@@ -222,7 +250,7 @@ async def search_papers(
         })
 
     # ---- 年份范围过滤（filter 不影响相关度分） ----
-    if year_from or year_to:
+    if year_from is not None or year_to is not None:
         year_range: dict = {}
         if year_from:
             year_range["gte"] = year_from
@@ -232,7 +260,7 @@ async def search_papers(
 
     # ---- venue 精确过滤 ----
     if venue:
-        filter_clauses.append({"term": {"venue": venue.upper()}})
+        filter_clauses.append({"term": {"venue": venue}})
 
     # ---- 组装最终 query ----
     if not must_clauses and not filter_clauses:
@@ -285,6 +313,17 @@ async def search_papers(
                     "title": hl.get("title", []),
                     "authors": hl.get("authors", []),
                 } if hl else None,
+                pages=src.get("pages"),
+                volume=src.get("volume"),
+                mdate=src.get("mdate"),
+                author_pids=src.get("author_pids", []),
+                ee_links=src.get("ee_links", []),
+                school=src.get("school"),
+                publisher=src.get("publisher"),
+                doi=src.get("doi"),
+                arxiv_id=src.get("arxiv_id"),
+                abstract=src.get("abstract"),
+                abstract_source=src.get("abstract_source"),
             )
         )
 

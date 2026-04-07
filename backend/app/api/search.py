@@ -59,7 +59,7 @@ async def get_paper_by_key(dblp_key: str) -> PaperSearchResponse:
 
         es: AsyncElasticsearch = get_es_client()
         try:
-            resp = await es.get(index=settings.ES_INDEX_PAPERS, id=dblp_key)
+            resp = await es.get(index=settings.ES_ALIAS_PAPERS, id=dblp_key)
         except NotFoundError:
             raise HTTPException(status_code=404, detail="论文未找到")
         src = resp["_source"]

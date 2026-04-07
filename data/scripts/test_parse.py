@@ -37,12 +37,13 @@ TAG_COUNTER: dict[str, int] = {}
 
 _ENTITY_RE = re.compile(rb"&([a-zA-Z][a-zA-Z0-9]*);")
 
+_XML_BUILTIN_ENTITIES: frozenset[str] = frozenset({"amp", "lt", "gt", "quot", "apos"})
+
 
 class _EntityFixStream:
     def __init__(self, fileobj):
         self._f = fileobj
         self._buf = b""
-        self._first = True
 
     def read(self, size: int = 65536) -> bytes:
         chunk = self._f.read(size)
@@ -56,19 +57,17 @@ class _EntityFixStream:
             data = data[:last_amp]
         else:
             self._buf = b""
-        if self._first:
-            data = data.replace(b'encoding="ISO-8859-1"', b'encoding="UTF-8"')
-            data = data.replace(b"encoding='ISO-8859-1'", b"encoding='UTF-8'")
-            self._first = False
         return self._replace(data)
 
     @staticmethod
     def _replace(data: bytes) -> bytes:
         def _sub(m: re.Match) -> bytes:
             name = m.group(1).decode("ascii", errors="ignore")
+            if name in _XML_BUILTIN_ENTITIES:
+                return m.group(0)
             replaced = html.unescape(f"&{name};")
             if replaced != f"&{name};":
-                return replaced.encode("utf-8")
+                return "".join(f"&#{ord(c)};" for c in replaced).encode("ascii")
             return m.group(0)
         return _ENTITY_RE.sub(_sub, data)
 
