@@ -31,9 +31,10 @@ class PaperDoc(BaseModel):
     # --- 跨源关联标识符（数据融合桥梁）---
     doi: str | None = None        # DOI，如 10.1016/j.artint.2023.103
     arxiv_id: str | None = None   # arXiv ID，如 2301.12345
+    ccf_rating: str | None = None  # CCF 评级：A | B | C | N
     # --- 预留：外部 API 补全字段 ---
     abstract: str | None = None       # 论文摘要
-    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | None
+    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | OpenAlex | None
 
 
 class PaperSearchResult(BaseModel):
@@ -59,9 +60,10 @@ class PaperSearchResult(BaseModel):
     # --- 跨源关联标识符（数据融合桥梁）---
     doi: str | None = None        # DOI
     arxiv_id: str | None = None   # arXiv ID
+    ccf_rating: str | None = None # CCF 评级
     # --- 预留：外部 API 补全字段 ---
     abstract: str | None = None       # 论文摘要
-    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | None
+    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | OpenAlex | None
 
 
 class PaperSearchResponse(BaseModel):

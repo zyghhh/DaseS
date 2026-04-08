@@ -80,9 +80,10 @@ PAPERS_MAPPING: dict = {
             # --- 跨源关联标识符（数据融合桥梁）---
             "doi":         {"type": "keyword"},                           # DOI，如 10.1016/j.artint.2023.103
             "arxiv_id":    {"type": "keyword"},                           # arXiv ID，如 2301.12345
+            "ccf_rating":  {"type": "keyword"},                           # CCF 评级：A | B | C | N
             # --- 预留：外部 API 补全字段 ---
             "abstract":       {"type": "text", "index": False},             # 论文摘要，外部数据源补全
-            "abstract_source": {"type": "keyword"},                          # 摘要来源：S2AG | ArXiv | None
+            "abstract_source": {"type": "keyword"},                          # 摘要来源：S2AG | ArXiv | OpenAlex | None
         }
     },
 }
@@ -190,11 +191,12 @@ async def search_papers(
     year_from: int | None = None,
     year_to: int | None = None,
     venue: str | None = None,
+    ccf_rating: str | None = None,
     search_mode: str = "bm25",
     page: int = 1,
     size: int = 10,
 ) -> PaperSearchResponse:
-    """按标题/作者/年份/venue 搜索论文，支持多种搜索模式。
+    """按标题/作者/年份/venue/ccf_rating 搜索论文，支持多种搜索模式。
 
     Args:
         title:       标题关键词（可选）。
@@ -202,6 +204,7 @@ async def search_papers(
         year_from:   年份下限（含）。
         year_to:     年份上限（含）。
         venue:       会议/期刊名称精确过滤。
+        ccf_rating:  CCF 评级（A|B|C|N）。
         search_mode: bm25(默认) | phrase(短语精确) | fuzzy(宽松模糊)。
         page:        页码（从 1 开始）。
         size:        每页结果数。
@@ -262,6 +265,10 @@ async def search_papers(
     if venue:
         filter_clauses.append({"term": {"venue": venue}})
 
+    # ---- ccf_rating 精确过滤 ----
+    if ccf_rating:
+        filter_clauses.append({"term": {"ccf_rating": ccf_rating}})
+
     # ---- 组装最终 query ----
     if not must_clauses and not filter_clauses:
         query: dict = {"match_all": {}}
@@ -289,6 +296,7 @@ async def search_papers(
         from_=from_,
         size=size,
         highlight=highlight if must_clauses else None,
+        track_total_hits=True,  # 精确统计总命中数，突破 ES 默认 10000 上限
     )
 
     hits = resp["hits"]
@@ -322,6 +330,7 @@ async def search_papers(
                 publisher=src.get("publisher"),
                 doi=src.get("doi"),
                 arxiv_id=src.get("arxiv_id"),
+                ccf_rating=src.get("ccf_rating"),
                 abstract=src.get("abstract"),
                 abstract_source=src.get("abstract_source"),
             )

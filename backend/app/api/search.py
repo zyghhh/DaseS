@@ -17,6 +17,7 @@ async def search_papers_endpoint(
     year_from: int | None = Query(None, description="年份下限，如 2015"),
     year_to: int | None = Query(None, description="年份上限，如 2024"),
     venue: str | None = Query(None, description="会议/期刊名称，如 ICML、NeurIPS"),
+    ccf_rating: str | None = Query(None, description="CCF 评级: A | B | C | N"),
     search_mode: str = Query("bm25", description="搜索模式: bm25(默认) | phrase(短语) | fuzzy(宽松)"),
     page: int = Query(1, ge=1, description="页码"),
     size: int = Query(10, ge=1, le=100, description="每页条数"),
@@ -32,13 +33,14 @@ async def search_papers_endpoint(
     """
     if search_mode not in ("bm25", "phrase", "fuzzy"):
         raise HTTPException(status_code=400, detail="search_mode 必须为 bm25 | phrase | fuzzy")
-    if title is None and author is None and venue is None and year_from is None and year_to is None:
+    if title is None and author is None and venue is None and year_from is None and year_to is None and ccf_rating is None:
         size = min(size, 50)
     try:
         return await search_papers(
             title=title, author=author,
             year_from=year_from, year_to=year_to,
-            venue=venue, search_mode=search_mode,
+            venue=venue, ccf_rating=ccf_rating,
+            search_mode=search_mode,
             page=page, size=size,
         )
     except Exception as exc:
@@ -73,6 +75,18 @@ async def get_paper_by_key(dblp_key: str) -> PaperSearchResponse:
             ee=src.get("ee"),
             pub_type=src.get("pub_type", "inproceedings"),
             score=1.0,
+            pages=src.get("pages"),
+            volume=src.get("volume"),
+            mdate=src.get("mdate"),
+            author_pids=src.get("author_pids", []),
+            ee_links=src.get("ee_links", []),
+            school=src.get("school"),
+            publisher=src.get("publisher"),
+            doi=src.get("doi"),
+            arxiv_id=src.get("arxiv_id"),
+            ccf_rating=src.get("ccf_rating"),
+            abstract=src.get("abstract"),
+            abstract_source=src.get("abstract_source"),
         )
         return PaperSearchResponse(total=1, page=1, size=1, results=[result])
     except HTTPException:

@@ -60,7 +60,19 @@ DBLP_DTD_URL = "https://dblp.org/xml/dblp.dtd"
 ALIAS_NAME: str = settings.ES_ALIAS_PAPERS      # dblp_search
 INDEX_PREFIX: str = settings.ES_INDEX_PREFIX     # dblp_index
 
-TARGET_TAGS: frozenset[str] = frozenset({"article", "inproceedings"})
+# 所有支持的 DBLP 文档类型
+ALL_TAGS: frozenset[str] = frozenset({
+    "article",        # 期刊论文
+    "inproceedings",  # 会议论文
+    "book",           # 专著
+    "incollection",   # 书章节
+    "proceedings",    # 会议论文集（元数据）
+    "phdthesis",      # 博士论文
+    "mastersthesis",  # 硕士论文
+})
+
+# 默认导入全量类型
+TARGET_TAGS: frozenset[str] = ALL_TAGS
 
 # 最低文档数量阈值（低于此值认为灌库异常）
 MIN_DOC_COUNT: int = 7_000_000
@@ -235,24 +247,68 @@ def _elem_to_raw_xml(elem: etree._Element) -> str:
 
 
 _DOI_RE = re.compile(r"https?://(?:dx\.)?doi\.org/(.+)")
-_ARXIV_RE = re.compile(r"https?://arxiv\.org/abs/([\w.]+)")
+
+# arXiv URL 格式（按优先级）：
+# 1. 新格式: https://arxiv.org/abs/2301.01234 或 .../abs/2301.01234v2
+_ARXIV_NEW_RE = re.compile(r"https?://arxiv\.org/abs/(\d{4}\.\d{4,5}(?:v\d+)?)")
+# 2. 旧格式: https://arxiv.org/abs/cs/0011010 或 .../abs/hep-th/9901001 或 .../abs/cs.AI/0301001
+_ARXIV_OLD_RE = re.compile(r"https?://arxiv\.org/abs/([a-z][a-zA-Z0-9-]*(?:\.[A-Z]{2})?/\d{4,7})")
+# 3. doi.org arXiv 形式: https://doi.org/10.48550/arXiv.2510.02493
+_ARXIV_DOI_RE = re.compile(r"https?://doi\.org/10\.48550/arXiv\.(\d{4}\.\d{4,5}(?:v\d+)?)")
+# 4. dblp_key 兜底: journals/corr/abs-YYYY-NNNNN（如 abs-2301-01234 → 2301.01234）
+_CORR_KEY_RE = re.compile(r"^journals/corr/abs-(\d{4})-(\d{4,5})(?:v\d+)?$")
 
 
 def _extract_doi(ee_links: list[str]) -> str | None:
-    """从 ee_links 中提取 DOI（去掉 https://doi.org/ 前缀）"""
+    """从 ee_links 中提取 DOI（去掉 https://doi.org/ 前缀，跳过 arXiv DOI）"""
     for link in ee_links:
+        # 跳过 arXiv 专用 DOI（10.48550/arXiv.*），这类 DOI 价值低且重复 arXiv ID
+        if "10.48550/arXiv" in link:
+            continue
         m = _DOI_RE.match(link)
         if m:
             return m.group(1).rstrip("/")
     return None
 
 
-def _extract_arxiv_id(ee_links: list[str]) -> str | None:
-    """从 ee_links 中提取 arXiv ID（如 2301.12345）"""
+def _extract_arxiv_id(ee_links: list[str], dblp_key: str = "") -> str | None:
+    """从 ee_links 中提取 arXiv ID，支持新旧 URL 格式及 doi.org 形式。
+
+    匹配优先级：
+    1. arxiv.org/abs/YYYY.NNNNN （新格式）
+    2. doi.org/10.48550/arXiv.YYYY.NNNNN （doi 形式）
+    3. arxiv.org/abs/category/NNNNNNN （旧格式，如 cs/0011010）
+    4. dblp_key journals/corr/abs-YYYY-NNNNN 兜底
+
+    Args:
+        ee_links: <ee> 链接列表。
+        dblp_key: DBLP 文档 key，用于兜底提取（可选）。
+
+    Returns:
+        标准化的 arXiv ID 字符串，未找到则返回 None。
+    """
     for link in ee_links:
-        m = _ARXIV_RE.match(link)
+        # 新格式: arxiv.org/abs/2301.01234
+        m = _ARXIV_NEW_RE.search(link)
         if m:
-            return m.group(1)
+            return re.sub(r"v\d+$", "", m.group(1))  # 去除版本后缀
+
+        # doi.org arXiv 形式: doi.org/10.48550/arXiv.2301.01234
+        m = _ARXIV_DOI_RE.search(link)
+        if m:
+            return re.sub(r"v\d+$", "", m.group(1))
+
+        # 旧格式: arxiv.org/abs/cs/0011010 或 abs/hep-th/9901001
+        m = _ARXIV_OLD_RE.search(link)
+        if m:
+            return m.group(1)  # 保留 category/NNNNNNN 形式，如 cs/0011010
+
+    # 兜底：从 dblp_key 提取（journals/corr/abs-YYYY-NNNNN → YYYY.NNNNN）
+    if dblp_key:
+        m = _CORR_KEY_RE.match(dblp_key)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}"
+
     return None
 
 
@@ -369,6 +425,7 @@ def stream_ingest(
     limit: int = 0,
     batch_size: int = 500,
     ccf_map: dict[str, str] | None = None,
+    target_tags: frozenset[str] | None = None,
 ) -> tuple[int, int]:
     """流式解析 DBLP XML 并批量写入 ES（内存友好，不全量加载）。
 
@@ -378,6 +435,8 @@ def stream_ingest(
         xml_gz_path: dblp.xml.gz 文件路径。
         limit: 最多导入条数，0 表示不限制（全量）。
         batch_size: 每批写入的文档数。
+        ccf_map: CCF 评级映射字典。
+        target_tags: 要解析的文档类型集合，None 时使用全局 TARGET_TAGS。
 
     Returns:
         (成功总数, 失败总数)
@@ -390,14 +449,15 @@ def stream_ingest(
 
     if ccf_map is None:
         ccf_map = {}
+    tags = target_tags or TARGET_TAGS
     limit_str = f"{limit} 条" if limit > 0 else "全量（不限制）"
-    print(f"[ingest] 开始解析: {xml_gz_path}（目标: {limit_str}）")
+    print(f"[ingest] 开始解析: {xml_gz_path}（目标: {limit_str}，类型: {sorted(tags)}）")
 
     with gzip.open(xml_gz_path, "rb") as f:
         context = etree.iterparse(
             _EntityFixStream(f),
             events=("end",),
-            tag=list(TARGET_TAGS),
+            tag=list(tags),
             recover=True,
             load_dtd=False,
             resolve_entities=False,
@@ -428,7 +488,7 @@ def stream_ingest(
             school     = _text(elem, "school")               # 学位论文学校
             publisher  = _text(elem, "publisher")            # 出版社
             doi        = _extract_doi(ee_links)              # 从 ee_links 提取 DOI
-            arxiv_id   = _extract_arxiv_id(ee_links)         # 从 ee_links 提取 arXiv ID
+            arxiv_id   = _extract_arxiv_id(ee_links, key)     # 从 ee_links 或 dblp_key 提取 arXiv ID
             ccf_rating = _get_ccf_rating(key, ccf_map)       # 匹配 CCF 评级
 
             doc = {
@@ -617,16 +677,16 @@ def switch_alias(es: Elasticsearch, new_index: str, alias: str = ALIAS_NAME) -> 
 
 
 # ---------------------------------------------------------------------------
-# Step 5: 垃圾回收（保留 N-1 版本）
+# Step 5: 垃圾回收（删除 N-2 及更旧版本，仅保留 N 与 N-1）
 # ---------------------------------------------------------------------------
 
 def garbage_collect(es: Elasticsearch, current_index: str, keep_previous: str | None = None) -> None:
-    """删除比 N-1 更旧的索引，释放磁盘空间。
+    """删除 N-2 及更旧的索引，仅保留当前版本（N）与上一版本（N-1）以备回滚。
 
     Args:
         es: Elasticsearch 同步客户端。
         current_index: 当前正在使用的索引（刚切换到的绿库）。
-        keep_previous: 需要保留的上一版本索引（用于回滚）。
+        keep_previous: 需要保留的上一版本索引（N-1，用于回滚）。
     """
     print(f"\n[gc] 开始垃圾回收 ...")
 
@@ -695,6 +755,92 @@ def rollback(es: Elasticsearch, alias: str = ALIAS_NAME) -> None:
     print(f"[rollback] ✅ 已回滚到: {target}")
 
 
+
+# ---------------------------------------------------------------------------
+# 增量入库模式
+# ---------------------------------------------------------------------------
+
+
+def run_incremental_pipeline(
+    xml_gz_path: str,
+    target_tags: frozenset[str],
+    limit: int = 0,
+    batch_size: int = 500,
+) -> None:
+    """增量模式：直接向当前活跃索引（别名所指向的索引）写入数据。
+
+    不创建新索引，不切换别名，不执行垃圾回收。
+    适用场景：向已有索引追加新类型（如补充 book/thesis）或新增论文。
+
+    Args:
+        xml_gz_path: dblp.xml.gz 文件路径。
+        target_tags: 要导入的文档类型集合。
+        limit: 最多导入条数，0 表示全量。
+        batch_size: 批量写入大小。
+    """
+    print("=" * 60)
+    print(f"  DBLP 增量入库模式")
+    print(f"  ES 地址:     {settings.ES_HOST}")
+    print(f"  别名:        {ALIAS_NAME}")
+    print(f"  数据文件:    {xml_gz_path}")
+    print(f"  导入限制:    {'全量' if limit == 0 else f'{limit:,} 条'}")
+    print(f"  文档类型:    {sorted(target_tags)}")
+    print("=" * 60)
+
+    if not Path(xml_gz_path).exists():
+        print(f"[incremental] ❌ 文件不存在: {xml_gz_path}")
+        sys.exit(1)
+
+    es = Elasticsearch(hosts=[settings.ES_HOST], request_timeout=60)
+
+    # 获取当前别名指向的索引
+    try:
+        alias_info = es.indices.get_alias(name=ALIAS_NAME)
+        current_indices = list(alias_info.keys())
+    except NotFoundError:
+        print(f"[incremental] ❌ 别名 '{ALIAS_NAME}' 不存在，请先运行全量导入创建索引。")
+        es.close()
+        sys.exit(1)
+
+    if not current_indices:
+        print(f"[incremental] ❌ 别名 '{ALIAS_NAME}' 没有指向任何索引。")
+        es.close()
+        sys.exit(1)
+
+    target_index = current_indices[0]
+    print(f"[incremental] 目标索引: {target_index}")
+
+    # 记录写入前文档数
+    before_count = es.count(index=target_index)["count"]
+    print(f"[incremental] 当前文档数: {before_count:,}")
+
+    # 流式写入（_id=dblp_key，已存在则覆盖，不存在则新增）
+    ccf_map = _load_ccf_map()
+    total_ok, total_err = stream_ingest(
+        es, target_index, xml_gz_path,
+        limit=limit, batch_size=batch_size,
+        ccf_map=ccf_map, target_tags=target_tags,
+    )
+
+    if total_ok == 0:
+        print(f"[incremental] ❌ 无数据写入成功，请检查文档类型和数据文件。")
+        es.close()
+        sys.exit(1)
+
+    # 刷新索引使数据可见
+    es.indices.refresh(index=target_index)
+    after_count = es.count(index=target_index)["count"]
+    es.close()
+
+    print("\n" + "=" * 60)
+    print(f"  ✅ 增量入库完成！")
+    print(f"  索引:    {target_index}")
+    print(f"  写入成功: {total_ok:,} 条")
+    print(f"  写入失败: {total_err:,} 条")
+    print(f"  文档总数: {before_count:,} → {after_count:,}（+{after_count - before_count:,}）")
+    print("=" * 60)
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -706,8 +852,9 @@ def run_full_pipeline(
     batch_size: int = 500,
     skip_download: bool = False,
     skip_validate_threshold: int = MIN_DOC_COUNT,
+    target_tags: frozenset[str] | None = None,
 ) -> None:
-    """执行完整的蓝绿发布流水线。
+    """执行完整的蓝绳发布流水线。
 
     Args:
         xml_gz_path: dblp.xml.gz 文件路径。
@@ -716,17 +863,20 @@ def run_full_pipeline(
         batch_size: 批量写入大小。
         skip_download: 是否跳过下载步骤。
         skip_validate_threshold: 校验文档数阈值。
+        target_tags: 要导入的文档类型集合，None 时使用 TARGET_TAGS。
     """
     suffix = date_suffix or _today_suffix()
     new_index = f"{INDEX_PREFIX}_{suffix}"
-
+    tags = target_tags or TARGET_TAGS
+    
     print("=" * 60)
-    print(f"  DBLP 蓝绿发布入库流水线")
+    print(f"  DBLP 蓝绳发布入库流水线")
     print(f"  ES 地址:     {settings.ES_HOST}")
     print(f"  别名:        {ALIAS_NAME}")
     print(f"  新索引:      {new_index}")
     print(f"  数据文件:    {xml_gz_path}")
     print(f"  导入限制:    {'全量' if limit == 0 else f'{limit:,} 条'}")
+    print(f"  文档类型:    {sorted(tags)}")
     print("=" * 60)
 
     es = Elasticsearch(hosts=[settings.ES_HOST], request_timeout=60)
@@ -746,7 +896,11 @@ def run_full_pipeline(
 
     # --- Step 2: 流式灌库 ---
     ccf_map = _load_ccf_map()
-    total_ok, total_err = stream_ingest(es, new_index, xml_gz_path, limit=limit, batch_size=batch_size, ccf_map=ccf_map)
+    total_ok, total_err = stream_ingest(
+        es, new_index, xml_gz_path,
+        limit=limit, batch_size=batch_size,
+        ccf_map=ccf_map, target_tags=tags,
+    )
 
     if total_ok == 0:
         print(f"[pipeline] ❌ 无数据写入成功，中止流水线。")
@@ -804,15 +958,41 @@ def main() -> None:
     parser.add_argument("--date", default=None, help="日期后缀（默认当天，如 20260401）")
     parser.add_argument("--skip-download", action="store_true", help="跳过下载步骤")
     parser.add_argument("--min-docs", type=int, default=MIN_DOC_COUNT, help=f"校验最低文档数（默认 {MIN_DOC_COUNT:,}）")
+    parser.add_argument(
+        "--tags",
+        default=None,
+        help=(
+            "指定导入的文档类型，逗号分隔（默认导入全部类型）。"
+            f"可选项: {', '.join(sorted(ALL_TAGS))}"
+        ),
+    )
 
     # 特殊操作模式
     parser.add_argument("--switch-only", action="store_true", help="仅执行别名切换（跳过导入）")
     parser.add_argument("--index", default=None, help="--switch-only 时指定目标索引名")
     parser.add_argument("--rollback", action="store_true", help="回滚到上一个版本")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help=(
+            "增量模式：直接向当前活跃索引写入数据，不创建新索引不切换别名。"
+            "适合追加新类型（建议配合 --tags 指定类型）。"
+        ),
+    )
 
     args = parser.parse_args()
 
     es = Elasticsearch(hosts=[settings.ES_HOST], request_timeout=60)
+
+    # 解析 --tags 参数
+    if args.tags:
+        tag_set = frozenset(t.strip() for t in args.tags.split(",") if t.strip())
+        invalid = tag_set - ALL_TAGS
+        if invalid:
+            print(f"❌ 无效的文档类型: {invalid}，可选: {sorted(ALL_TAGS)}")
+            sys.exit(1)
+    else:
+        tag_set = TARGET_TAGS
 
     # --- 回滚模式 ---
     if args.rollback:
@@ -834,6 +1014,17 @@ def main() -> None:
         es.close()
         return
 
+    # --- 增量模式 ---
+    if args.incremental:
+        es.close()
+        run_incremental_pipeline(
+            xml_gz_path=args.input,
+            target_tags=tag_set,
+            limit=args.limit,
+            batch_size=args.batch_size,
+        )
+        return
+
     # --- 完整流水线 ---
     run_full_pipeline(
         xml_gz_path=args.input,
@@ -842,6 +1033,7 @@ def main() -> None:
         batch_size=args.batch_size,
         skip_download=args.skip_download,
         skip_validate_threshold=args.min_docs,
+        target_tags=tag_set,
     )
 
 

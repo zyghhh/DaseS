@@ -3,7 +3,7 @@ S2AG 全量摘要下载与合并脚本
 
 功能:
   1. 从 Semantic Scholar Academic Graph (S2AG) API 拉取最新 abstracts 数据集文件列表
-  2. 流式下载各分片 gzip 文件到远程服务器 /data/S2AG_ABSTRACT/raw/（断点续传）
+  2. 流式下载各分片 gzip 文件到远程服务器 /data/s2ag_abstract/raw/（断点续传）
   3. 逐行解析 JSON，按批次更新 Elasticsearch 中对应 DOI 的摘要字段
   4. 使用状态文件记录已处理文件，支持中断后断点续传
 
@@ -29,13 +29,24 @@ S2AG 全量摘要下载与合并脚本
     python ingest_s2ag_abstracts.py --overwrite
 
     # 自定义输出目录和 ES 地址
-    python ingest_s2ag_abstracts.py --output-dir /data/S2AG_ABSTRACT --es-host http://localhost:9200
+    python ingest_s2ag_abstracts.py --output-dir /data/s2ag_abstract --es-host http://localhost:9200
+    仅测试下载功能（不写 ES，下载 1 个分片）：
+    bash
+    cd /mnt/d/vDesktop/DaseS/backend
+    uv run python ../data/scripts/ingest_s2ag_abstracts.py \
+    --output-dir ../data/ingest_s2ag_abstract \
+    --remote-host 49.52.27.139 \
+    --download-only \
+    --delete-after-upload
+
+
 """
 
 import argparse
 import gzip
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -43,8 +54,15 @@ from pathlib import Path
 from typing import Iterator
 
 import requests
+from dotenv import load_dotenv
 from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch.helpers import bulk
+
+# 自动加载 backend/.env（脚本从任意目录运行时均可找到）
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_ENV_PATH = _SCRIPT_DIR.parent.parent / "backend" / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(_ENV_PATH)
 
 # ---------------------------------------------------------------------------
 # 默认配置（均可通过环境变量或 CLI 参数覆盖）
@@ -55,7 +73,13 @@ DEFAULT_S2AG_API_KEY: str = os.environ.get(
 )
 DEFAULT_ES_HOST: str = os.environ.get("ES_HOST", "http://49.52.27.139:9200")
 DEFAULT_ES_ALIAS: str = os.environ.get("ES_ALIAS", "dblp_search")
-DEFAULT_OUTPUT_DIR: str = os.environ.get("S2AG_OUTPUT_DIR", "/data/S2AG_ABSTRACT")
+DEFAULT_OUTPUT_DIR: str = os.environ.get("S2AG_OUTPUT_DIR", "/data/s2ag_abstract")
+
+# 远程服务器 SSH 默认配置（下载完成后自动上传）
+DEFAULT_REMOTE_HOST: str = os.environ.get("REMOTE_HOST", "49.52.27.139")
+DEFAULT_REMOTE_USER: str = os.environ.get("REMOTE_USER", "zyg")
+DEFAULT_REMOTE_PORT: int = int(os.environ.get("REMOTE_PORT", "22"))
+DEFAULT_REMOTE_DIR: str = os.environ.get("REMOTE_S2AG_ABSTRACT_DIR", os.environ.get("REMOTE_DIR", "/data/s2ag_abstract/raw/"))
 
 # S2AG API 端点
 S2AG_DATASET_URL = (
@@ -122,14 +146,102 @@ def fetch_file_list(api_key: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def get_remote_files(
+    remote_user: str,
+    remote_host: str,
+    remote_port: int,
+    remote_dir: str,
+) -> set[str]:
+    """通过 SSH 获取远程服务器目录中已有的文件名集合。
+
+    Args:
+        remote_user: SSH 用户名。
+        remote_host: 远程主机地址。
+        remote_port: SSH 端口。
+        remote_dir: 远程目录路径。
+
+    Returns:
+        远程目录中的文件名集合（不含路径），获取失败返回空集合。
+    """
+    cmd = [
+        "ssh",
+        "-p", str(remote_port),
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=30",
+        f"{remote_user}@{remote_host}",
+        f"ls {remote_dir} 2>/dev/null",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            names: set[str] = {n for n in result.stdout.strip().split("\n") if n}
+            _log("remote", f"远程服务器 {remote_dir} 已有 {len(names)} 个文件")
+            return names
+    except Exception as e:
+        _log("remote", f"⚠️  获取远程文件列表失败: {e}")
+    return set()
+
+
+# ---------------------------------------------------------------------------
+# Step 1.5: 上传到远程服务器
+# ---------------------------------------------------------------------------
+
+
+def upload_to_remote(
+    local_path: Path,
+    remote_user: str,
+    remote_host: str,
+    remote_port: int,
+    remote_dir: str,
+    delete_local: bool = False,
+) -> bool:
+    """使用 rsync 将本地文件上传到远程服务器，上传成功后可选删除本地副本。
+
+    Args:
+        local_path: 本地文件路径。
+        remote_user: SSH 用户名。
+        remote_host: 远程主机地址。
+        remote_port: SSH 端口。
+        remote_dir: 远程目标目录（需以 / 结尾）。
+        delete_local: 上传成功后是否删除本地文件（默认 False）。
+
+    Returns:
+        上传是否成功。
+    """
+    remote_target = f"{remote_user}@{remote_host}:{remote_dir}"
+    cmd = [
+        "rsync", "-az", "--progress",
+        "-e", f"ssh -p {remote_port} -o StrictHostKeyChecking=no -o ConnectTimeout=30",
+        str(local_path),
+        remote_target,
+    ]
+    _log("upload", f"上传 {local_path.name} → {remote_target}")
+    try:
+        subprocess.run(cmd, check=True)
+        size_mb = local_path.stat().st_size // 1024 // 1024
+        _log("upload", f"✅ 上传成功: {local_path.name} ({size_mb} MB)")
+        if delete_local:
+            local_path.unlink()
+            _log("upload", f"🗑️  已删除本地副本: {local_path.name}")
+        return True
+    except subprocess.CalledProcessError as e:
+        _log("upload", f"❌ 上传失败: {local_path.name} — {e}")
+        return False
+
+
 def download_files(
     files: list[dict],
     raw_dir: Path,
     api_key: str,
     max_files: int = 0,
     rate_limit_secs: float = 1.0,
+    remote_host: str = "",
+    remote_user: str = DEFAULT_REMOTE_USER,
+    remote_port: int = DEFAULT_REMOTE_PORT,
+    remote_dir: str = DEFAULT_REMOTE_DIR,
+    delete_after_upload: bool = False,
 ) -> list[Path]:
-    """流式下载所有 S2AG abstracts 分片文件。
+    """流式下载所有 S2AG abstracts 分片文件，每个文件下载完成后立即上传到远程服务器。
 
     已存在且大小大于 0 的文件自动跳过（断点续传）。
     相邻两次实际下载请求之间强制等待 rate_limit_secs 秒，遵守 S2AG 限速。
@@ -140,6 +252,11 @@ def download_files(
         api_key: Semantic Scholar API 密钥。
         max_files: 最多下载文件数（0=全量）。
         rate_limit_secs: 两次下载请求间最小间隔秒数（默认 1.0）。
+        remote_host: 远程服务器地址，为空则不上传。
+        remote_user: SSH 用户名。
+        remote_port: SSH 端口。
+        remote_dir: 远程目标目录。
+        delete_after_upload: 上传成功后是否删除本地副本。
 
     Returns:
         所有本地文件路径列表（按顺序）。
@@ -153,6 +270,11 @@ def download_files(
         files = files[:max_files]
         _log("download", f"--max-files={max_files}，仅处理前 {max_files}/{total} 个文件")
     total = len(files)
+
+    # 预先拉取远程服务器已有文件列表，避免重复下载
+    remote_files: set[str] = set()
+    if remote_host:
+        remote_files = get_remote_files(remote_user, remote_host, remote_port, remote_dir)
 
     last_download_time: float = 0.0  # 上次实际发起下载的时间戳
 
@@ -175,10 +297,16 @@ def download_files(
         local_path = raw_dir / raw_name
         local_paths.append(local_path)
 
+        # 优先检查远程服务器是否已有该文件（避免重复下载）
+        if raw_name in remote_files:
+            _log("download", f"[{idx}/{total}] 远程已存在，跳过: {raw_name}")
+            continue
+
+        # 再检查本地是否已有该文件
         if local_path.exists() and local_path.stat().st_size > 0:
             _log(
                 "download",
-                f"[{idx}/{total}] 已存在，跳过: {local_path.name} "
+                f"[{idx}/{total}] 本地已存在，跳过: {local_path.name} "
                 f"({local_path.stat().st_size // 1024 // 1024} MB)",
             )
             continue
@@ -221,6 +349,16 @@ def download_files(
                 f"[{idx}/{total}] ✅ 下载完成: {local_path.name} "
                 f"({local_path.stat().st_size // 1024 // 1024} MB)",
             )
+            # ---- 立即上传到远程服务器 ----
+            if remote_host:
+                upload_to_remote(
+                    local_path=local_path,
+                    remote_user=remote_user,
+                    remote_host=remote_host,
+                    remote_port=remote_port,
+                    remote_dir=remote_dir,
+                    delete_local=delete_after_upload,
+                )
         except Exception as e:
             _log("download", f"❌ 下载失败: {raw_name} — {e}")
             if tmp_path.exists():
@@ -280,16 +418,20 @@ def save_state(output_dir: Path, done: set[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def iter_abstracts(local_path: Path) -> Iterator[tuple[str, str]]:
-    """流式解析 S2AG abstracts gzip 文件，逐行 yield (doi, abstract)。
+def iter_abstracts(local_path: Path) -> Iterator[tuple[str, str, str]]:
+    """流式解析 S2AG abstracts gzip 文件，逐行 yield (doi, arxiv_id, abstract)。
 
-    只 yield DOI 和摘要均非空的记录。
+    支持两种数据格式：
+    1. 新格式（openaccessinfo 嵌套）：
+       {"corpusid": ..., "openaccessinfo": {"externalids": {"DOI": ..., "ArXiv": ...}}, "abstract": ...}
+    2. 旧格式（externalids 顶层）：
+       {"corpusid": ..., "externalids": {"DOI": ..., "ArXiv": ...}, "abstract": ...}
 
     Args:
         local_path: 本地 .jsonl.gz 文件路径。
 
     Yields:
-        (doi, abstract) 元组。
+        (doi, arxiv_id, abstract) 元组，doi 或 arxiv_id 可能为空字符串。
     """
     with gzip.open(local_path, "rb") as gz:
         for raw_line in gz:
@@ -305,10 +447,19 @@ def iter_abstracts(local_path: Path) -> Iterator[tuple[str, str]]:
             if not abstract or not abstract.strip():
                 continue
 
+            # 兼容新旧两种数据格式
             external_ids: dict = record.get("externalids") or {}
-            doi: str | None = external_ids.get("DOI")
-            if doi and doi.strip():
-                yield doi.strip(), abstract.strip()
+            if not external_ids:
+                # 新格式：openaccessinfo.externalids
+                open_access_info: dict = record.get("openaccessinfo") or {}
+                external_ids = open_access_info.get("externalids") or {}
+
+            doi: str = (external_ids.get("DOI") or "").strip()
+            arxiv_id: str = (external_ids.get("ArXiv") or "").strip()
+
+            # 至少有一个标识符才 yield
+            if doi or arxiv_id:
+                yield doi, arxiv_id, abstract.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -316,31 +467,49 @@ def iter_abstracts(local_path: Path) -> Iterator[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def _search_by_dois(
+def _search_by_identifiers(
     es: Elasticsearch,
     alias: str,
     dois: list[str],
+    arxiv_ids: list[str],
     overwrite: bool,
 ) -> list[dict]:
-    """用 terms 查询在 ES 中找到对应 DOI 的文档，返回需要更新的文档列表。
+    """用 terms 查询在 ES 中找到对应 DOI 或 ArXiv ID 的文档，返回需要更新的文档列表。
 
     Args:
         es: Elasticsearch 客户端。
         alias: ES 别名/索引名。
         dois: DOI 列表。
+        arxiv_ids: ArXiv ID 列表。
         overwrite: 是否强制覆盖已有摘要。
 
     Returns:
-        需要更新的文档列表，每项含 '_id', 'doi'。
+        需要更新的文档列表，每项含 '_id', 'doi', 'arxiv_id'。
     """
+    # 构建 should 子句：匹配 DOI 或 ArXiv ID
+    should_clauses: list[dict] = []
+    if dois:
+        should_clauses.append({"terms": {"doi": dois}})
+    if arxiv_ids:
+        should_clauses.append({"terms": {"arxiv_id": arxiv_ids}})
+
+    if not should_clauses:
+        return []
+
     if overwrite:
-        # 覆盖模式：找所有匹配 DOI 的文档
-        query: dict = {"terms": {"doi": dois}}
+        # 覆盖模式：找所有匹配的文档
+        query: dict = {
+            "bool": {
+                "should": should_clauses,
+                "minimum_should_match": 1,
+            }
+        }
     else:
         # 默认模式：只找 abstract 为空的文档
         query = {
             "bool": {
-                "must": {"terms": {"doi": dois}},
+                "should": should_clauses,
+                "minimum_should_match": 1,
                 "must_not": {"exists": {"field": "abstract"}},
             }
         }
@@ -349,8 +518,8 @@ def _search_by_dois(
         resp = es.search(
             index=alias,
             query=query,
-            _source=["doi"],
-            size=len(dois) + 10,  # 多留一些余量
+            _source=["doi", "arxiv_id"],
+            size=max(len(dois), len(arxiv_ids)) + 50,
         )
     except Exception as e:
         _log("es", f"⚠️  搜索失败: {e}")
@@ -361,6 +530,7 @@ def _search_by_dois(
         results.append({
             "_id": hit["_id"],
             "doi": hit["_source"].get("doi", ""),
+            "arxiv_id": hit["_source"].get("arxiv_id", ""),
         })
     return results
 
@@ -373,26 +543,34 @@ def _search_by_dois(
 def update_abstracts_batch(
     es: Elasticsearch,
     alias: str,
-    doi_abstract_map: dict[str, str],
+    id_abstract_map: dict[tuple[str, str], str],
     overwrite: bool,
 ) -> tuple[int, int]:
-    """将一批 DOI->摘要 映射更新到 ES。
+    """将一批 (doi, arxiv_id)->摘要 映射更新到 ES。
 
-    1. 按 DOI 搜索匹配的文档（abstract 为空 或 overwrite 模式）
+    1. 按 DOI 或 ArXiv ID 搜索匹配的文档（abstract 为空 或 overwrite 模式）
     2. 构造 bulk update actions
     3. 执行 bulk 写入
 
     Args:
         es: Elasticsearch 客户端。
         alias: ES 别名/索引名。
-        doi_abstract_map: {doi: abstract} 字典。
+        id_abstract_map: {(doi, arxiv_id): abstract} 字典。
         overwrite: 是否强制覆盖已有摘要。
 
     Returns:
         (成功数, 跳过/失败数)
     """
-    dois = list(doi_abstract_map.keys())
-    matched_docs = _search_by_dois(es, alias, dois, overwrite)
+    # 提取所有 DOI 和 ArXiv ID 用于搜索
+    dois: list[str] = []
+    arxiv_ids: list[str] = []
+    for doi, arxiv_id in id_abstract_map.keys():
+        if doi:
+            dois.append(doi)
+        if arxiv_id:
+            arxiv_ids.append(arxiv_id)
+
+    matched_docs = _search_by_identifiers(es, alias, dois, arxiv_ids, overwrite)
 
     if not matched_docs:
         return 0, 0
@@ -400,9 +578,18 @@ def update_abstracts_batch(
     actions: list[dict] = []
     for doc in matched_docs:
         doc_doi: str = doc["doi"]
-        abstract = doi_abstract_map.get(doc_doi)
+        doc_arxiv: str = doc["arxiv_id"]
+
+        # 优先用 DOI 匹配，其次用 ArXiv ID
+        abstract = id_abstract_map.get((doc_doi, doc_arxiv))
+        if not abstract and doc_doi:
+            abstract = id_abstract_map.get((doc_doi, ""))
+        if not abstract and doc_arxiv:
+            abstract = id_abstract_map.get(("", doc_arxiv))
+
         if not abstract:
             continue
+
         actions.append({
             "_op_type": "update",
             "_index": alias,
@@ -459,22 +646,22 @@ def process_file(
     _log("process", f"开始处理: {local_path.name}")
     file_start = time.time()
 
-    doi_batch: dict[str, str] = {}
+    id_batch: dict[tuple[str, str], str] = {}
     file_valid = 0
     file_ok = 0
     file_err = 0
     global_count = total_processed_so_far
 
-    for doi, abstract in iter_abstracts(local_path):
-        doi_batch[doi] = abstract
+    for doi, arxiv_id, abstract in iter_abstracts(local_path):
+        id_batch[(doi, arxiv_id)] = abstract
         file_valid += 1
         global_count += 1
 
-        if len(doi_batch) >= BULK_BATCH_SIZE:
-            ok, err = update_abstracts_batch(es, alias, doi_batch, overwrite)
+        if len(id_batch) >= BULK_BATCH_SIZE:
+            ok, err = update_abstracts_batch(es, alias, id_batch, overwrite)
             file_ok += ok
             file_err += err
-            doi_batch.clear()
+            id_batch.clear()
 
         if file_valid % LOG_INTERVAL == 0:
             elapsed = time.time() - file_start
@@ -490,11 +677,11 @@ def process_file(
             break
 
     # 处理最后一批
-    if doi_batch:
-        ok, err = update_abstracts_batch(es, alias, doi_batch, overwrite)
+    if id_batch:
+        ok, err = update_abstracts_batch(es, alias, id_batch, overwrite)
         file_ok += ok
         file_err += err
-        doi_batch.clear()
+        id_batch.clear()
 
     elapsed = time.time() - file_start
     _log(
@@ -523,6 +710,11 @@ def run(
     limit: int,
     max_files: int = 0,
     rate_limit_secs: float = 1.0,
+    remote_host: str = "",
+    remote_user: str = DEFAULT_REMOTE_USER,
+    remote_port: int = DEFAULT_REMOTE_PORT,
+    remote_dir: str = DEFAULT_REMOTE_DIR,
+    delete_after_upload: bool = False,
 ) -> None:
     """执行 S2AG 摘要全量下载与入库流水线。
 
@@ -537,6 +729,11 @@ def run(
         limit: 全局最大处理记录数（0=不限）。
         max_files: 最多下载/处理的文件数（0=全量）。
         rate_limit_secs: 两次下载请求间最小间隔秒数。
+        remote_host: 远程服务器地址，为空则不上传。
+        remote_user: SSH 用户名（默认 zyg）。
+        remote_port: SSH 端口（默认 22）。
+        remote_dir: 远程目标目录。
+        delete_after_upload: 上传成功后删除本地副本。
     """
     raw_dir = output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -551,22 +748,36 @@ def run(
     print(f"  处理上限:   {'全量' if limit == 0 else f'{limit:,} 条'}")
     print(f"  文件限制:   {'全量' if max_files == 0 else f'{max_files} 个分片'}")
     print(f"  限速间隔:   {rate_limit_secs}s / 次")
+    if remote_host:
+        print(f"  远程上传:   {remote_user}@{remote_host}:{remote_port} → {remote_dir}")
+        print(f"  上传后删本地: {'是' if delete_after_upload else '否'}")
+    else:
+        print(f"  远程上传:   已禁用（使用 --remote-host 启用）")
     print("=" * 65)
     pipeline_start = time.time()
 
-    # --- Step 0: 获取文件列表 ---
-    files = fetch_file_list(api_key)
-    if not files:
-        _log("run", "❌ 未获取到任何文件，退出。")
-        sys.exit(1)
-
-    # --- Step 1: 下载 ---
+    # --- Step 0: 获取文件列表（skip-download 模式下跳过，避免不必要的网络请求）---
     if skip_download:
-        # 直接扫描 raw_dir 中已有文件
         local_paths: list[Path] = sorted(raw_dir.glob("*.gz"))
         _log("run", f"跳过下载，扫描到 {len(local_paths)} 个本地文件")
     else:
-        local_paths = download_files(files, raw_dir, api_key, max_files=max_files, rate_limit_secs=rate_limit_secs)
+        files = fetch_file_list(api_key)
+        if not files:
+            _log("run", "❌ 未获取到任何文件，退出。")
+            sys.exit(1)
+
+    # --- Step 1: 下载 ---
+    if not skip_download:
+        local_paths = download_files(
+            files, raw_dir, api_key,
+            max_files=max_files,
+            rate_limit_secs=rate_limit_secs,
+            remote_host=remote_host,
+            remote_user=remote_user,
+            remote_port=remote_port,
+            remote_dir=remote_dir,
+            delete_after_upload=delete_after_upload,
+        )
 
     if not local_paths:
         _log("run", "❌ 无可用本地文件，退出。")
@@ -720,6 +931,34 @@ def main() -> None:
         help="两次文件下载请求之间的最小等待秒数（默认 1.0，遵守 S2AG 限速）",
     )
 
+    # --- 远程上传配置 ---
+    parser.add_argument(
+        "--remote-host",
+        default=os.environ.get("REMOTE_HOST", ""),
+        help="远程服务器地址（为空则不上传；也可通过环境变量 REMOTE_HOST 设置）",
+    )
+    parser.add_argument(
+        "--remote-user",
+        default=DEFAULT_REMOTE_USER,
+        help=f"SSH 用户名（默认 {DEFAULT_REMOTE_USER}，可通过 REMOTE_USER 覆盖）",
+    )
+    parser.add_argument(
+        "--remote-port",
+        type=int,
+        default=DEFAULT_REMOTE_PORT,
+        help=f"SSH 端口（默认 {DEFAULT_REMOTE_PORT}，可通过 REMOTE_PORT 覆盖）",
+    )
+    parser.add_argument(
+        "--remote-dir",
+        default=DEFAULT_REMOTE_DIR,
+        help=f"远程目标目录（默认 {DEFAULT_REMOTE_DIR}，可通过 REMOTE_DIR 覆盖）",
+    )
+    parser.add_argument(
+        "--delete-after-upload",
+        action="store_true",
+        help="上传成功后删除本地副本，节省本地磁盘空间",
+    )
+
     args = parser.parse_args()
 
     if args.download_only and args.skip_download:
@@ -736,6 +975,11 @@ def main() -> None:
         limit=args.limit,
         max_files=args.max_files,
         rate_limit_secs=args.rate_limit,
+        remote_host=args.remote_host,
+        remote_user=args.remote_user,
+        remote_port=args.remote_port,
+        remote_dir=args.remote_dir,
+        delete_after_upload=args.delete_after_upload,
     )
 
 
