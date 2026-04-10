@@ -53,7 +53,6 @@ S2AG + ArXiv + OpenAlex 增量摘要补全脚本
     cd /mnt/d/vDesktop/DaseS/backend
     uv run python ../data/scripts/supplement_abstracts.py \
     --no-s2ag --no-arxiv \
-    --openalex-email zyg_Laa@163.com \
     --output-dir ../data/s2ag_abstract/state_openalex
 """
 
@@ -108,16 +107,20 @@ OPENALEX_API_URL = "https://api.openalex.org/works/{doi}"
 OPENALEX_MAILTO_PARAM = "mailto"
 
 # 批量参数
-S2AG_BATCH_SIZE: int = 500       # S2AG 每批 DOI 数量
-ARXIV_BATCH_SIZE: int = 100      # ArXiv 每批 ID 数量（id_list 参数，单次 HTTP 请求）
+S2AG_BATCH_SIZE: int = 500       # S2AG 每批 DOI/ArXiv ID 数量
+ARXIV_BATCH_SIZE: int = 100       # ArXiv API 每批 ID 数量（降低触发限速概率）
 ES_BULK_SIZE: int = 500          # ES bulk 写入批量大小
 ES_SCROLL_SIZE: int = 5000       # ES scroll 每页大小
 ES_SCROLL_TIMEOUT: str = "5m"    # scroll 保持时间
 
 # 限速参数
-S2AG_RATE_LIMIT_SECS: float = 1.0   # 有 API Key 时 1 次/秒
-ARXIV_RATE_LIMIT_SECS: float = 5.0  # ArXiv 要求 3 秒间隔
-OPENALEX_RATE_LIMIT_SECS: float = 0.2  # OpenAlex 礼貌池约 10 次/秒；保守设 0.2s
+S2AG_RATE_LIMIT_SECS: float = 1.0    # 有 API Key 时 1 次/秒
+ARXIV_RATE_LIMIT_SECS: float = 3.0   # ArXiv 批次间隔（基础值，429 时指数退避）
+ARXIV_RETRY_MAX: int = 4             # ArXiv 429/连接失败最大重试次数
+ARXIV_RETRY_BASE_WAIT: float = 60.0  # 第一次 429 等待时间（秒），后续翻倍
+OPENALEX_RATE_LIMIT_SECS: float = 3  # OpenAlex 礼貌池约 10 次/秒；保守设 0.2s
+OPENALEX_RETRY_MAX: int = 3             # OpenAlex 429 最大重试次数
+OPENALEX_RETRY_BASE_WAIT: float = 30.0  # OpenAlex 429 首次等待秒数
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +265,7 @@ def fetch_abstracts_from_s2ag_batch(
     docs: list[dict],
     api_key: str,
 ) -> dict[str, str]:
-    """调用 S2AG Batch API 批量获取摘要。
+    """调用 S2AG Batch API 批量获取摘要（按 DOI 查询）。
 
     将 docs 列表按 S2AG_BATCH_SIZE 分块，每块发送一次 POST 请求。
     使用 API Key 时须遵守 1 次/秒限速。
@@ -320,6 +323,74 @@ def fetch_abstracts_from_s2ag_batch(
                     found += 1
 
         _log("s2ag", f"  本批获取 {found} 条摘要")
+
+    return results
+
+
+def fetch_abstracts_from_s2ag_arxiv_batch(
+    docs: list[dict],
+    api_key: str,
+) -> dict[str, str]:
+    """调用 S2AG Batch API 批量获取摘要（按 ArXiv ID 查询）。
+
+    专为有 arxiv_id 但无 DOI 的记录设计（Phase 1.5）。
+    S2AG 支持 "ARXIV:xxx" 格式，速率与 DOI 批量查询相同。
+
+    Args:
+        docs: 文档列表，每项须含 'arxiv_id' 字段。
+        api_key: Semantic Scholar API 密钥。
+
+    Returns:
+        {normalized_arxiv_id: abstract} 字典。
+    """
+    if not docs:
+        return {}
+
+    headers = {"x-api-key": api_key}
+    results: dict[str, str] = {}
+    total_chunks = (len(docs) + S2AG_BATCH_SIZE - 1) // S2AG_BATCH_SIZE
+
+    for chunk_idx in range(total_chunks):
+        start = chunk_idx * S2AG_BATCH_SIZE
+        end = min(start + S2AG_BATCH_SIZE, len(docs))
+        chunk = docs[start:end]
+
+        # 组装 S2AG 请求格式："ARXIV:cs.SE/0010035"
+        ids_payload = [f"ARXIV:{_normalize_arxiv_id(doc['arxiv_id'])}" for doc in chunk]
+
+        if chunk_idx > 0:
+            time.sleep(S2AG_RATE_LIMIT_SECS)
+
+        _log(
+            "s2ag_arxiv",
+            f"[{chunk_idx + 1}/{total_chunks}] 请求 {len(ids_payload)} 条 ArXiv ID...",
+        )
+
+        try:
+            resp = requests.post(
+                S2AG_BATCH_URL,
+                headers=headers,
+                json={"ids": ids_payload},
+                params={"fields": "abstract,externalIds"},
+                timeout=60,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            _log("s2ag_arxiv", f"❌ 请求失败: {e}")
+            continue
+
+        papers = resp.json()
+        found = 0
+        for paper in papers:
+            if not paper or not paper.get("abstract"):
+                continue
+            # S2AG 返回的 externalIds.ArXiv 即为规范化 ID（无版本号）
+            arxiv_id = paper.get("externalIds", {}).get("ArXiv", "")
+            if arxiv_id:
+                results[_normalize_arxiv_id(arxiv_id)] = paper["abstract"].strip()
+                found += 1
+
+        _log("s2ag_arxiv", f"  本批获取 {found} 条摘要")
 
     return results
 
@@ -450,14 +521,15 @@ def _normalize_arxiv_id(arxiv_id: str) -> str:
     return re.sub(r'v\d+$', '', arxiv_id)
 
 
-def fetch_abstracts_from_arxiv_batch(arxiv_ids: list[str]) -> dict[str, str]:
-    """批量调用 ArXiv API 获取摘要（单次 HTTP 请求，id_list 逗号分隔）。
-
-    ArXiv API 的 id_list 参数支持传入多个 ID，max_results 控制返回数量。
-    参考：https://info.arxiv.org/help/api/basics.html
+def fetch_abstracts_from_arxiv_batch(
+    arxiv_ids: list[str],
+    retry_wait: float = ARXIV_RETRY_BASE_WAIT,
+) -> dict[str, str]:
+    """批量调用 ArXiv API 获取摘要，含指数退避重试。
 
     Args:
         arxiv_ids: ArXiv ID 列表（可含版本号后缀，如 2301.01234v1）。
+        retry_wait: 首次 429 等待秒数，后续每次翻倍。
 
     Returns:
         {normalized_arxiv_id: abstract} 字典，key 已去除版本号后缀。
@@ -473,24 +545,50 @@ def fetch_abstracts_from_arxiv_batch(arxiv_ids: list[str]) -> dict[str, str]:
     )
 
     results: dict[str, str] = {}
-    try:
-        response = urllib.request.urlopen(url, timeout=60).read()
-        root = ET.fromstring(response)
+    wait = retry_wait
+    for attempt in range(ARXIV_RETRY_MAX + 1):
+        try:
+            response = urllib.request.urlopen(url, timeout=90).read()
+            root = ET.fromstring(response)
 
-        for entry in root.findall("atom:entry", ARXIV_NAMESPACE):
-            id_elem = entry.find("atom:id", ARXIV_NAMESPACE)
-            if id_elem is None or not id_elem.text:
-                continue
-            # id_elem.text 形如 "http://arxiv.org/abs/2301.01234v2"
-            raw_id = id_elem.text.strip().split("/abs/")[-1]
-            normalized = _normalize_arxiv_id(raw_id)
+            for entry in root.findall("atom:entry", ARXIV_NAMESPACE):
+                id_elem = entry.find("atom:id", ARXIV_NAMESPACE)
+                if id_elem is None or not id_elem.text:
+                    continue
+                raw_id = id_elem.text.strip().split("/abs/")[-1]
+                normalized = _normalize_arxiv_id(raw_id)
+                summary = entry.find("atom:summary", ARXIV_NAMESPACE)
+                if summary is not None and summary.text:
+                    results[normalized] = summary.text.strip().replace("\n", " ")
+            return results  # 成功则直接返回
 
-            summary = entry.find("atom:summary", ARXIV_NAMESPACE)
-            if summary is not None and summary.text:
-                results[normalized] = summary.text.strip().replace("\n", " ")
-
-    except Exception as e:
-        _log("arxiv", f"⚠️  批量查询失败（{len(arxiv_ids)} 条 ID）: {e}")
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                if attempt < ARXIV_RETRY_MAX:
+                    _log(
+                        "arxiv",
+                        f"⚠️  429 限速（第 {attempt + 1}/{ARXIV_RETRY_MAX} 次重试），"
+                        f"等待 {wait:.0f}s...",
+                    )
+                    time.sleep(wait)
+                    wait = min(wait * 2, 300.0)  # 指数退避，上限 5 分钟
+                else:
+                    _log("arxiv", f"⚠️  429 已达最大重试次数，放弃本批 {len(arxiv_ids)} 条")
+            else:
+                _log("arxiv", f"⚠️  HTTP {e.code}，放弃本批: {e}")
+                break
+        except Exception as e:
+            if attempt < ARXIV_RETRY_MAX:
+                _log(
+                    "arxiv",
+                    f"⚠️  连接失败（第 {attempt + 1}/{ARXIV_RETRY_MAX} 次重试），"
+                    f"等待 {wait:.0f}s: {e}",
+                )
+                time.sleep(wait)
+                wait = min(wait * 2, 300.0)
+            else:
+                _log("arxiv", f"⚠️  批量查询失败（{len(arxiv_ids)} 条 ID）: {e}")
+                break
 
     return results
 
@@ -716,12 +814,13 @@ def run(
 
             s2ag_buf.clear()
 
-            # 积累够 ES_BULK_SIZE 时写入 ES
-            if len(batch_updates) >= ES_BULK_SIZE:
+            # 每批立即写入 ES（不等攒够 ES_BULK_SIZE，避免数据积压丢失）
+            if batch_updates:
                 ok, err = update_es_abstracts(es, es_alias, batch_updates)
                 total_s2ag_ok += ok
                 if err > 0:
                     _log("s2ag", f"⚠️  ES 写入失败 {err} 条")
+                _log("s2ag", f"  本批写入 ES {ok} 条")
                 batch_updates.clear()
 
             # 每批保存一次断点状态
@@ -753,7 +852,143 @@ def run(
 
         _log("run", f"Phase 1 完成: S2AG 累计更新 {total_s2ag_ok:,} 条")
 
-    # --- Phase 2: ArXiv API 兜底 ---
+    # --- Phase 1.5: S2AG ArXiv 批量补全（arxiv_id 有但 DOI 缺失的记录）---
+    if not no_s2ag:
+        _log("run", "=" * 40)
+        _log("run", "Phase 1.5: S2AG ArXiv ID 批量补全")
+        _log("run", "=" * 40)
+
+        s2ag_arxiv_processed_ids: set[str] = set(
+            state.get("s2ag_arxiv_processed_ids", [])
+        )
+        total_s2ag_arxiv_ok: int = state.get("total_s2ag_arxiv_ok", 0)
+
+        # 查询有 arxiv_id 但无摘要的记录（无论是否有 DOI）
+        arxiv_pending_query: dict = {"bool": {"must": [
+            {"exists": {"field": "arxiv_id"}},
+        ]}}
+        if not overwrite:
+            arxiv_pending_query["bool"]["must"].append(
+                {"bool": {"must_not": {"exists": {"field": "abstract_source"}}}}
+            )
+
+        s2ag_arxiv_buf: list[dict] = []
+        s2ag_arxiv_updates: list[dict] = []
+        s2ag_arxiv_batch_idx = 0
+        total_scrolled_s2ag_arxiv = 0
+
+        def _flush_s2ag_arxiv_buf() -> None:
+            """将 s2ag_arxiv_buf 通过 S2AG ARXIV 批量接口处理。"""
+            nonlocal s2ag_arxiv_batch_idx, total_s2ag_arxiv_ok
+            if not s2ag_arxiv_buf:
+                return
+
+            if s2ag_arxiv_batch_idx > 0:
+                time.sleep(S2AG_RATE_LIMIT_SECS)
+
+            s2ag_arxiv_batch_idx += 1
+            _log(
+                "s2ag_arxiv",
+                f"[批次 {s2ag_arxiv_batch_idx}] 处理 {len(s2ag_arxiv_buf)} 条 "
+                f"(scroll 遍历 {total_scrolled_s2ag_arxiv:,})",
+            )
+
+            abstract_map = fetch_abstracts_from_s2ag_arxiv_batch(s2ag_arxiv_buf, api_key)
+            found = 0
+            for doc in s2ag_arxiv_buf:
+                aid = _normalize_arxiv_id(doc["arxiv_id"])
+                abstract = abstract_map.get(aid)
+                if abstract:
+                    s2ag_arxiv_updates.append({
+                        "_id": doc["_id"],
+                        "abstract": abstract,
+                        "abstract_source": "S2AG_ArXiv",
+                    })
+                    found += 1
+                s2ag_arxiv_processed_ids.add(aid)
+
+            _log("s2ag_arxiv", f"  本批获取 {found}/{len(s2ag_arxiv_buf)} 条摘要")
+            s2ag_arxiv_buf.clear()
+
+            # 每批立即写入 ES
+            if s2ag_arxiv_updates:
+                ok, err = update_es_abstracts(es, es_alias, s2ag_arxiv_updates)
+                total_s2ag_arxiv_ok += ok
+                if err > 0:
+                    _log("s2ag_arxiv", f"⚠️  ES 写入失败 {err} 条")
+                _log("s2ag_arxiv", f"  本批写入 ES {ok} 条")
+                s2ag_arxiv_updates.clear()
+
+            state.update({
+                "s2ag_arxiv_processed_ids": sorted(s2ag_arxiv_processed_ids),
+                "total_s2ag_arxiv_ok": total_s2ag_arxiv_ok,
+            })
+            save_state(output_dir, state)
+
+        try:
+            resp_s2a = es.search(
+                index=es_alias,
+                query=arxiv_pending_query,
+                _source=["doi", "arxiv_id", "dblp_key"],
+                size=ES_SCROLL_SIZE,
+                scroll=ES_SCROLL_TIMEOUT,
+            )
+            scroll_id_s2a = resp_s2a.get("_scroll_id", "")
+            s2a_total = resp_s2a["hits"]["total"]["value"]
+            _log("s2ag_arxiv", f"有 arxiv_id 且无摘要的记录: {s2a_total:,} 条")
+
+            while True:
+                hits = resp_s2a["hits"]["hits"]
+                if not hits:
+                    break
+                for hit in hits:
+                    total_scrolled_s2ag_arxiv += 1
+                    src = hit["_source"]
+                    aid = src.get("arxiv_id") or ""
+                    if not aid or not is_valid_arxiv_id(aid):
+                        continue
+                    norm = _normalize_arxiv_id(aid)
+                    if norm in s2ag_arxiv_processed_ids:
+                        continue
+                    s2ag_arxiv_buf.append({
+                        "_id": hit["_id"],
+                        "arxiv_id": aid,
+                        "doi": src.get("doi", ""),
+                    })
+                    if len(s2ag_arxiv_buf) >= S2AG_BATCH_SIZE:
+                        _flush_s2ag_arxiv_buf()
+
+                try:
+                    resp_s2a = es.scroll(
+                        scroll_id=scroll_id_s2a, scroll=ES_SCROLL_TIMEOUT
+                    )
+                    scroll_id_s2a = resp_s2a.get("_scroll_id", scroll_id_s2a)
+                except Exception:
+                    break
+
+            try:
+                es.clear_scroll(scroll_id=scroll_id_s2a)
+            except Exception:
+                pass
+
+        except Exception as e:
+            _log("s2ag_arxiv", f"❌ scroll 查询失败: {e}")
+
+        _flush_s2ag_arxiv_buf()
+
+        if s2ag_arxiv_updates:
+            ok, err = update_es_abstracts(es, es_alias, s2ag_arxiv_updates)
+            total_s2ag_arxiv_ok += ok
+            s2ag_arxiv_updates.clear()
+
+        state.update({
+            "s2ag_arxiv_processed_ids": sorted(s2ag_arxiv_processed_ids),
+            "total_s2ag_arxiv_ok": total_s2ag_arxiv_ok,
+        })
+        save_state(output_dir, state)
+        _log("run", f"Phase 1.5 完成: S2AG ArXiv 累计更新 {total_s2ag_arxiv_ok:,} 条")
+
+    # --- Phase 2: ArXiv API 兜底（S2AG 找不到的剩余部分）---
     if not no_arxiv:
         _log("run", "=" * 40)
         _log("run", "Phase 2: ArXiv API 兜底")
@@ -797,7 +1032,6 @@ def run(
             for doc in arxiv_buf:
                 aid = doc["arxiv_id"]
                 normalized = _normalize_arxiv_id(aid)
-                # 优先用规范化 ID 匹配（API 响应去版本号），兜底用原始 ID
                 abstract = abstract_map.get(normalized) or abstract_map.get(aid)
                 if abstract:
                     arxiv_updates.append({
@@ -811,12 +1045,13 @@ def run(
             _log("arxiv", f"  本批获取 {found}/{len(ids)} 条摘要")
             arxiv_buf.clear()
 
-            # 积累够 ES_BULK_SIZE 时写入 ES
-            if len(arxiv_updates) >= ES_BULK_SIZE:
+            # 每批立即写入 ES
+            if arxiv_updates:
                 ok, err = update_es_abstracts(es, es_alias, arxiv_updates)
                 total_arxiv_ok += ok
                 if err > 0:
                     _log("arxiv", f"⚠️  ES 写入失败 {err} 条")
+                _log("arxiv", f"  本批写入 ES {ok} 条")
                 arxiv_updates.clear()
 
             # 每批保存一次断点状态
@@ -906,7 +1141,11 @@ def run(
 
         openalex_query = {"bool": {"must": must_clauses_ol}}
 
-        openalex_docs: list[dict] = []
+        # 流式处理：边 scroll 边逐条查 OpenAlex，与 Phase 1/2 一致
+        openalex_updates: list[dict] = []
+        total_scrolled_ol = 0
+        total_openalex_hits = 0
+
         try:
             resp = es.search(
                 index=es_alias,
@@ -917,6 +1156,7 @@ def run(
             )
             scroll_id = resp.get("_scroll_id", "")
             openalex_total = resp["hits"]["total"]["value"]
+            total_openalex_hits = openalex_total
             _log("openalex", f"有 DOI 且仍无摘要的记录: {openalex_total:,} 条")
 
             while True:
@@ -925,16 +1165,49 @@ def run(
                     break
 
                 for hit in hits:
+                    total_scrolled_ol += 1
                     src = hit["_source"]
                     doi = src.get("doi") or ""
-                    # 跳过已处理过的 DOI
-                    if doi and doi not in openalex_processed_dois:
-                        openalex_docs.append({
+                    if not doi or doi in openalex_processed_dois:
+                        continue
+
+                    # 限速
+                    if total_scrolled_ol > 1:
+                        time.sleep(OPENALEX_RATE_LIMIT_SECS)
+
+                    # 每 500 条或首条输出进度
+                    if total_scrolled_ol % 500 == 1:
+                        _log(
+                            "openalex",
+                            f"[{total_scrolled_ol:,}/{openalex_total:,}] "
+                            f"查询 DOI:{doi}... 已获取 {len(openalex_updates)} 条摘要",
+                        )
+
+                    abstract = fetch_abstract_from_openalex(doi, openalex_email)
+                    openalex_processed_dois.add(doi)
+
+                    if abstract:
+                        openalex_updates.append({
                             "_id": hit["_id"],
-                            "doi": doi,
-                            "arxiv_id": src.get("arxiv_id") or "",
-                            "dblp_key": src.get("dblp_key", ""),
+                            "abstract": abstract,
+                            "abstract_source": "OpenAlex",
                         })
+
+                    # 积累够 ES_BULK_SIZE 时写入 ES
+                    if len(openalex_updates) >= ES_BULK_SIZE:
+                        ok, err = update_es_abstracts(es, es_alias, openalex_updates)
+                        total_openalex_ok += ok
+                        if err > 0:
+                            _log("openalex", f"⚠️  ES 写入失败 {err} 条")
+                        openalex_updates.clear()
+
+                    # 每 500 条保存一次状态
+                    if total_scrolled_ol % 500 == 0:
+                        state.update({
+                            "openalex_processed_dois": sorted(openalex_processed_dois),
+                            "total_openalex_ok": total_openalex_ok,
+                        })
+                        save_state(output_dir, state)
 
                 try:
                     resp = es.scroll(scroll_id=scroll_id, scroll=ES_SCROLL_TIMEOUT)
@@ -948,65 +1221,22 @@ def run(
                 pass
 
         except Exception as e:
-            _log("openalex", f"❌ 查询无摘要记录失败: {e}")
+            _log("openalex", f"❌ OpenAlex scroll 查询失败: {e}")
 
-        _log("run", f"待 OpenAlex 处理的文档: {len(openalex_docs):,} 条")
+        # 写入剩余
+        if openalex_updates:
+            ok, err = update_es_abstracts(es, es_alias, openalex_updates)
+            total_openalex_ok += ok
+            openalex_updates.clear()
 
-        if openalex_docs:
-            openalex_updates: list[dict] = []
+        state.update({
+            "openalex_processed_dois": sorted(openalex_processed_dois),
+            "total_openalex_ok": total_openalex_ok,
+        })
+        save_state(output_dir, state)
 
-            for idx, doc in enumerate(openalex_docs, start=1):
-                doi = doc["doi"]
-
-                # 限速
-                if idx > 1:
-                    time.sleep(OPENALEX_RATE_LIMIT_SECS)
-
-                if idx % 100 == 0 or idx == len(openalex_docs):
-                    _log(
-                        "openalex",
-                        f"[{idx}/{len(openalex_docs)}] 查询 DOI:{doi}...",
-                    )
-
-                abstract = fetch_abstract_from_openalex(doi, openalex_email)
-
-                # 记录已处理的 DOI（无论是否有摘要）
-                openalex_processed_dois.add(doi)
-
-                if abstract:
-                    openalex_updates.append({
-                        "_id": doc["_id"],
-                        "abstract": abstract,
-                        "abstract_source": "OpenAlex",
-                    })
-
-                # 批量写入 ES
-                if len(openalex_updates) >= ES_BULK_SIZE:
-                    ok, err = update_es_abstracts(es, es_alias, openalex_updates)
-                    total_openalex_ok += ok
-                    openalex_updates.clear()
-
-                # 每 100 条保存一次状态
-                if idx % 100 == 0:
-                    state.update({
-                        "openalex_processed_dois": sorted(openalex_processed_dois),
-                        "total_openalex_ok": total_openalex_ok,
-                    })
-                    save_state(output_dir, state)
-
-            # 写入剩余
-            if openalex_updates:
-                ok, err = update_es_abstracts(es, es_alias, openalex_updates)
-                total_openalex_ok += ok
-                openalex_updates.clear()
-
-            state.update({
-                "openalex_processed_dois": sorted(openalex_processed_dois),
-                "total_openalex_ok": total_openalex_ok,
-            })
-            save_state(output_dir, state)
-
-        _log("run", f"Phase 3 完成: OpenAlex 累计更新 {total_openalex_ok:,} 条")
+        _log("run", f"Phase 3 完成: OpenAlex 累计更新 {total_openalex_ok:,} 条 "
+                   f"(遍历 {total_scrolled_ol:,}/{total_openalex_hits:,})")
 
     es.close()
 
