@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dases-mcp": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "cd backend && uv run python -m app.mcp_server"
+      ]
+    }
+  }
+}

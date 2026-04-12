@@ -1,0 +1,40 @@
+description = "启动多轮交互式学术论文语义检索 (DaseS)"
+
+prompt = """
+用户想要搜索 CS 学术论文，查询是：{{args}}
+
+请作为 DaseS 协调者，严格执行以下工作流：
+
+### Step 1 — 初始化
+调用 MCP 工具 `mcp_dases-mcp_start_search`，传入 `query="{{args}}"`。
+**必须记录返回的 `session_id`**，它是后续所有 DaseS 相关工具调用的强制参数。
+
+### Step 2 — 消歧与澄清
+如果 `start_search` 返回了消歧问题（Questions）：
+1. 使用内置工具 `ask_user` 将**所有**问题一次性呈现给用户（最多 4 个）。
+2. 问题的文本和选项 Label 必须完全按照工具返回的内容展示，不得自行转义或翻译。
+
+### Step 3 — 执行检索
+根据用户的回答构造检索请求：
+1. **调用工具**：执行 `mcp_dases-mcp_execute_search`。
+2. **answers 字典构造规则**：
+   - **Key**：必须使用 `start_search` 返回的问题 ID（如 `venue`, `ccf_rating` 等）。
+   - **Value**：必须是用户选择的选项 Label 的**精确字符串**（包括空格和括号）。
+   - **过滤逻辑**：如果用户对某个问题选择了 **“不限”**，则必须在 `answers` 字典中**彻底移除该 Key**，不要传递“不限”作为值。
+3. **无问题情况**：如果 `start_search` 未返回任何问题，直接调用 `execute_search` 且不传 `answers`。
+
+### Step 4 — 结果呈现
+将检索到的论文结果格式化为优雅的 Markdown 列表，包含以下字段：
+- 标题 (Title)
+- 作者 (Authors)
+- 年份 (Year) & 发表平台 (Venue)
+- CCF 分级 (CCF Rating)
+- 摘要摘要 (Abstract Summary)
+
+### 补充建议
+在输出结果末尾，添加以下提示：
+“💡 *您可以告诉我「生成相关工作 (Related Work)」，我会基于上述论文为您撰写综述。*”
+“📄 *如需更多结果，请回复「下一页」。*”
+
+**注意**：始终确保 `session_id` 在会话中传递，不要遗失。
+"""

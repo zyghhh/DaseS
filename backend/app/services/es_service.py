@@ -337,3 +337,78 @@ async def search_papers(
         )
 
     return PaperSearchResponse(total=total, page=page, size=size, results=results)
+
+
+# ---------------------------------------------------------------------------
+# 消歧：基于 ES aggregation 分析查询分布，返回澄清问题
+# ---------------------------------------------------------------------------
+
+async def clarify_search(query: str) -> dict:
+    """根据查询关键词分析 ES 中的分布情况，返回消歧问题供用户选择。
+
+    Args:
+        query: 用户输入的搜索关键词。
+
+    Returns:
+        dict: 包含 total_hits 和 questions 列表。
+    """
+    es = get_es_client()
+    index = settings.ES_ALIAS_PAPERS
+
+    # 先用 multi_match 搜索，同时做 aggregation
+    resp = await es.search(
+        index=index,
+        query={"multi_match": {"query": query, "fields": ["title^3", "title.raw"], "type": "best_fields"}},
+        size=0,
+        aggregations={
+            "top_venues": {"terms": {"field": "venue", "size": 8, "min_doc_count": 5}},
+            "year_histogram": {
+                "histogram": {"field": "year", "interval": 5, "order": {"_key": "desc"}},
+            },
+            "ccf_distribution": {"terms": {"field": "ccf_rating", "size": 4}},
+        },
+        track_total_hits=True,
+    )
+
+    total = resp["hits"]["total"]["value"]
+    aggs = resp.get("aggregations", {})
+
+    questions: list[dict] = []
+
+    # 问题 1：会议/期刊方向消歧
+    venue_buckets = aggs.get("top_venues", {}).get("buckets", [])
+    if len(venue_buckets) > 2:
+        options = [{"label": b["key"], "count": b["doc_count"]} for b in venue_buckets[:6]]
+        questions.append({
+            "id": "venue",
+            "question": "您关注哪个会议/期刊方向？",
+            "options": options,
+        })
+
+    # 问题 2：时间范围
+    year_buckets = aggs.get("year_histogram", {}).get("buckets", [])
+    if year_buckets:
+        recent = sum(b["doc_count"] for b in year_buckets if b["key"] >= 2020)
+        older = total - recent
+        if recent > 0 and older > 0:
+            questions.append({
+                "id": "time_range",
+                "question": "您关注哪个时间段？",
+                "options": [
+                    {"label": "近5年（2020至今）", "count": recent, "value": {"year_from": 2020}},
+                    {"label": "较早（2020以前）", "count": older, "value": {"year_to": 2019}},
+                    {"label": "不限", "count": total, "value": {}, "skip": True},
+                ],
+            })
+
+    # 问题 3：CCF 评级
+    ccf_buckets = aggs.get("ccf_distribution", {}).get("buckets", [])
+    if ccf_buckets:
+        questions.append({
+            "id": "ccf_rating",
+            "question": "对 CCF 评级有要求吗？",
+            "options": [{"label": f"CCF-{b['key']}", "count": b["doc_count"], "value": b["key"]} for b in ccf_buckets]
+                       + [{"label": "不限", "count": total, "value": None, "skip": True}],
+        })
+
+    return {"query": query, "total_hits": total, "questions": questions}

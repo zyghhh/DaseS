@@ -122,10 +122,16 @@ DaseS/
 
 ```
 用户输入 → Coordinator(意图识别)
-    ├→ PaperRetriever(论文检索: 向量 + BM25 混合)
+    ├→ PaperRetriever(=论文检索: 向量 + BM25 混合)
+      #TODO   
+      {命令行交互：
+      1.用户输入 /search_semantic_articles user query
+      2.cli 工具根据query提出几个针对性问题（明确/消歧问题），让用户先选择明确 
+      3.cli工具获取回答后调用我的服务完成检索 并格式化输出检索结果
+      }
     ├→ Summarizer(摘要生成: 单篇/多篇)
     └→ Analyzer(深度分析: 方法论对比/趋势分析)
-    → Coordinator(结果汇总) → 用户
+    → Coordinator(结果汇总) → 用户 
 ```
 
 ## 数据源

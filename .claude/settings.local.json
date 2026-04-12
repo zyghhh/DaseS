@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -X GET \"http://49.52.27.139:9200/*/_alias?pretty\")",
+      "Bash(curl:*)",
+      "Bash(uv run:*)",
+      "Bash(zcat /mnt/d/vDesktop/DaseS/data/raw/dblp.xml.gz)",
+      "Bash(zcat /mnt/d/vDesktop/DaseS/data/raw/raw/20260313_071344_00007_7biti_2a59a196-377b-4171-8e29-8be6fff1a645.gz)",
+      "mcp__dases__start_search",
+      "mcp__dases__execute_search"
+    ]
+  },
+  "mcpServers": {
+    "dases": {
+      "url": "http://localhost:8765/sse"
+    }
+  }
+}
