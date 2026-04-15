@@ -143,11 +143,12 @@ PAPERS_MAPPING: dict = {
             # --- 跨源关联标识符（数据融合桥梁）---
             "doi":         {"type": "keyword"},    # DOI，如 10.1016/j.artint.2023.103
             "arxiv_id":    {"type": "keyword"},    # arXiv ID，如 2301.12345
-            # --- 预留：外部 API 补全字段 ---
-            "abstract":       {"type": "text", "index": False},   # 论文摘要，外部数据源补全
+            # --- 外部 API 补全字段 ---
+            "abstract":    {"type": "text", "analyzer": "ik_max_word"},   # 摘要
             "abstract_source": {"type": "keyword"},                 # 摘要来源：S2AG | ArXiv | None
+            "keywords":    {"type": "keyword"},                     # 关键词
             "ccf_rating":      {"type": "keyword"},                 # CCF 评级: A, B, C
-        }
+            }
     },
 }
 

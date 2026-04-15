@@ -1,8 +1,11 @@
-# DaseS - 基于CS学术论文的多智能体检索系统
+﻿# DaseS - 基于CS学术论文的多智能体检索系统
 
 ## 项目概述
 
-面向计算机科学领域学术论文的多智能体检索系统（数据 + 服务）。后端基于 Python + FastAPI 提供学术论文检索 API 服务，前端支持 Agent Trace 监控、Prompt 版本化管理、用户与智能体直接对话。
+面向计算机科学领域学术论文的多智能体检索与相关工作生成系统（数据 + 服务）。
+后端基于 Python + FastAPI 提供学术论文检索 API 服务，前端支持 Agent Trace 监控、Prompt 版本化管理、用户与智能体直接对话。
+同时支持前端web多轮对话和对外的MCP服务，支持各种cli编程工具（claude code,gemini cli...）通过简洁的 cli command 定义接入使用。
+
 
 ## 项目结构
 
@@ -90,12 +93,11 @@ DaseS/
 | Web 框架 | FastAPI |
 | 多智能体编排 | LangGraph |
 | LLM 调用 | LangChain + LiteLLM |
-| 向量数据库 | Milvus |
+| 检索引擎 | Elasticsearch 8.x（BM25 + kNN 向量检索） |
 | 关系数据库 | PostgreSQL + SQLAlchemy (async) |
 | 缓存 | Redis |
 | Embedding | BAAI/bge-large-en-v1.5 |
 | 文档解析 | PyMuPDF + Unstructured |
-| 关键词检索 | rank-bm25 |
 | 可观测性 | LangFuse |
 
 ### 前端
@@ -114,24 +116,26 @@ DaseS/
 | 后端 API | 8000 |
 | PostgreSQL | 5432 |
 | Redis | 6379 |
-| Milvus | 19530 |
+| Elasticsearch | 9200 |
 | LangFuse | 3001 |
 | 前端 (dev) | 3000 |
 
 ## 智能体架构
 
 ```
+web 端：
 用户输入 → Coordinator(意图识别)
-    ├→ PaperRetriever(=论文检索: 向量 + BM25 混合)
-      #TODO   
-      {命令行交互：
-      1.用户输入 /search_semantic_articles user query
-      2.cli 工具根据query提出几个针对性问题（明确/消歧问题），让用户先选择明确 
-      3.cli工具获取回答后调用我的服务完成检索 并格式化输出检索结果
-      }
-    ├→ Summarizer(摘要生成: 单篇/多篇)
-    └→ Analyzer(深度分析: 方法论对比/趋势分析)
-    → Coordinator(结果汇总) → 用户 
+    ├→ PaperRetriever(论文检索: 向量 + BM25 混合)
+    ├→ Summarizer(结构化摘要生成)
+    └→ Analyzer(深度分析: 相关工作/系统性综述生成)
+    → Coordinator(结果汇总) → 用户
+
+cli 端：
+    1. 用户输入： /search_semantic_articles <query>
+    2. cli 调用 MCP 工具，根据 query 提出针对性问题（明确/消歧），让用户先确认
+    3. cli 工具获取回答后调用 MCP 服务完成检索，格式化输出学术论文检索结果
+    4. 多轮追问 (Follow-up)：用户继续输入："基于这些文章写一篇相关工作"
+    5. cli 自动调用 MCP 工具生成相关工作
 ```
 
 ## 数据源
@@ -150,7 +154,7 @@ DaseS/
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 1. 启动基础设施
-docker compose up -d postgres redis milvus langfuse
+docker compose up -d postgres redis langfuse
 
 # 2. 后端开发
 cd backend

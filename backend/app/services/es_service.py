@@ -81,10 +81,11 @@ PAPERS_MAPPING: dict = {
             "doi":         {"type": "keyword"},                           # DOI，如 10.1016/j.artint.2023.103
             "arxiv_id":    {"type": "keyword"},                           # arXiv ID，如 2301.12345
             "ccf_rating":  {"type": "keyword"},                           # CCF 评级：A | B | C | N
-            # --- 预留：外部 API 补全字段 ---
-            "abstract":       {"type": "text", "index": False},             # 论文摘要，外部数据源补全
+            # --- 外部 API 补全字段 ---
+            "abstract":    {"type": "text", "analyzer": "ik_max_word"},   # 摘要
             "abstract_source": {"type": "keyword"},                          # 摘要来源：S2AG | ArXiv | OpenAlex | None
-        }
+            "keywords":    {"type": "keyword"},                           # 关键词
+            }
     },
 }
 
@@ -379,6 +380,7 @@ async def clarify_search(query: str) -> dict:
     venue_buckets = aggs.get("top_venues", {}).get("buckets", [])
     if len(venue_buckets) > 2:
         options = [{"label": b["key"], "count": b["doc_count"]} for b in venue_buckets[:6]]
+        options.append({"label": "不限 (所有会议/期刊)", "count": total, "skip": True})
         questions.append({
             "id": "venue",
             "question": "您关注哪个会议/期刊方向？",

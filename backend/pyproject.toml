@@ -22,9 +22,9 @@ dependencies = [
     "langchain>=0.3",
     "langgraph>=0.2",
     "litellm>=1.50",
-    # --- 向量数据库 ---
-    "pymilvus>=2.4",
-    # "qdrant-client>=1.12",       # 备选
+    # --- 向量检索（通过 Elasticsearch kNN 实现，暂无独立向量库依赖）---
+    # "pymilvus>=2.4",          # 预留：后续若切换独立向量库再启用
+    # "qdrant-client>=1.12",    # 备选
     # --- Embedding ---
     "sentence-transformers>=3.0",
     "torch>=2.0",  # CPU-only, source overridden via [tool.uv.sources]

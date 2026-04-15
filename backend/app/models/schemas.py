@@ -35,6 +35,7 @@ class PaperDoc(BaseModel):
     # --- 预留：外部 API 补全字段 ---
     abstract: str | None = None       # 论文摘要
     abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | OpenAlex | None
+    keywords: list[str] | None = None  # 论文关键词/研究领域
 
 
 class PaperSearchResult(BaseModel):
@@ -62,8 +63,9 @@ class PaperSearchResult(BaseModel):
     arxiv_id: str | None = None   # arXiv ID
     ccf_rating: str | None = None # CCF 评级
     # --- 预留：外部 API 补全字段 ---
-    abstract: str | None = None       # 论文摘要
-    abstract_source: str | None = None # 摘要来源：S2AG | ArXiv | OpenAlex | None
+    abstract: str | None = None
+    abstract_source: str | None = None
+    keywords: list[str] | None = None
 
 
 class PaperSearchResponse(BaseModel):

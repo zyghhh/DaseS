@@ -5,18 +5,18 @@
 DaseS is a sophisticated multi-agent retrieval system specifically designed for computer science academic papers. It leverages a hybrid search approach (Vector + BM25) and coordinates specialized AI agents to provide deep analysis, summarization, and retrieval of scholarly literature.
 
 ### Architecture
-- **Backend (Python + FastAPI):** Orchestrates multi-agent workflows using **LangGraph**. It features a RAG pipeline with **Milvus** for vector search and **Elasticsearch** for BM25 keyword search.
+- **Backend (Python + FastAPI):** Orchestrates multi-agent workflows using **LangGraph**. It features a RAG pipeline with **Elasticsearch** for both BM25 keyword search and kNN vector search (dense_vector).
 - **Frontend (Next.js 15 + TypeScript):** A modern interactive interface using the App Router, **TanStack Query** for state management, and **React Flow** for agent trace visualization.
 - **Multi-Agent System:**
   - **Coordinator:** Intent recognition and task dispatching.
   - **Retriever:** Hybrid paper retrieval (Vector + BM25 + RRF).
   - **Summarizer:** Single/multi-paper abstract generation.
   - **Analyzer:** Methodology comparison and trend analysis.
-- **Infrastructure:** Containerized services via Docker Compose (PostgreSQL, Redis, Milvus, Elasticsearch, LangFuse).
+- **Infrastructure:** Containerized services via Docker Compose (PostgreSQL, Redis, Elasticsearch, LangFuse).
 
 ### Key Technologies
 - **LLM Orchestration:** LangGraph, LangChain, LiteLLM.
-- **Storage:** Milvus (Vector), Elasticsearch (BM25), PostgreSQL (Relational), Redis (Cache).
+- **Storage:** Elasticsearch (BM25 + kNN Vector), PostgreSQL (Relational), Redis (Cache).
 - **Observability:** LangFuse for agent tracing.
 - **UI/UX:** Tailwind CSS, Shadcn UI, Lucide React.
 
@@ -45,7 +45,11 @@ uv sync --extra dev
 cp .env.example .env  # Update with your LLM API keys and DB URLs
 
 # Run development server
-uv run uvicorn app.main:app --reload
+# If uv is not in PATH, use .venv/bin/python directly:
+.venv/bin/python -m uvicorn app.main:app --reload
+# MCP endpoint is available at: http://localhost:8000/mcp/
+# Alternatively with uv (requires uv in PATH):
+# uv run uvicorn app.main:app --reload
 ```
 
 ### 3. Frontend (Next.js)
@@ -62,8 +66,39 @@ npm run dev
 Scripts for processing OpenAlex and DBLP data are located in `data/scripts/`.
 ```bash
 # Example for S2AG abstract ingestion (see data/scripts/README.md for details)
-uv run data/scripts/ingest_s2ag_abstracts.py --es-host http://localhost:9200
+# Use .venv/bin/python (uv may not be available on all systems)
+.venv/bin/python data/scripts/ingest_s2ag_abstracts.py --es-host http://localhost:9200
 ```
+
+---
+
+## MCP Server
+
+The MCP server is embedded in FastAPI via **Streamable HTTP transport**. It starts automatically with the backend — no separate process needed.
+
+**MCP endpoint**: `http://localhost:8000/mcp/`
+
+**Gemini CLI configuration** — `.gemini/settings.json` (project-level):
+
+```json
+{
+  "mcpServers": {
+    "dases": {
+      "httpUrl": "http://localhost:8000/mcp/"
+    }
+  }
+}
+```
+
+The project already has `.gemini/settings.json` configured with the correct URL.
+
+**Available MCP tools**:
+- `start_search(query)` — Initialize session, returns disambiguation questions + `session_id`
+- `execute_search(session_id, answers?, search_mode?, size?, page?)` — Run search with filters
+- `list_session_papers(session_id)` — List all papers collected in current session
+- `write_related_work(session_id, topic, dblp_keys?, style?)` — Format papers for related work
+
+**How it works**: `mcp_server.py` defines 4 tools via `FastMCP`. In `main.py`, the lifespan explicitly calls `mcp.session_manager.run()` to initialize the task group (required because FastAPI `app.mount()` does not trigger sub-app lifespans).
 
 ---
 

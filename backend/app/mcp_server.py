@@ -1,10 +1,12 @@
 """
 DaseS MCP Server - 基于 CS 学术论文的检索与写作辅助工具。
 
-通过 stdio transport 运行，供 Claude Code /gemini cli等支持 MCP 的 AI 工具调用。
-会话状态通过 session_id 管理，存储在进程内存中（MVP 阶段，后续迁移 Redis）。
+支持两种运行模式：
+1. HTTP（Streamable HTTP）：挂载到 FastAPI 应用，由 uvicorn 提供服务。
+2. stdio：独立运行，供 CLI 工具直接启动。
+   启动方式：uv run python -m app.mcp_server
 
-启动方式：uv run python -m app.mcp_server
+会话状态通过 session_id 管理，存储在进程内存中（MVP 阶段，后续迁移 Redis）。
 """
 
 import time
@@ -14,8 +16,8 @@ from mcp.server.fastmcp import FastMCP
 
 from app.services.es_service import clarify_search, search_papers
 
-# stdio transport 下无需 host/port，移除冗余配置
-mcp = FastMCP("DaseS")
+# streamable_http_path="/" 使得挂载到 /mcp 后，端点路径为 /mcp/
+mcp = FastMCP("DaseS", streamable_http_path="/")
 
 # ---------------------------------------------------------------------------
 # 会话级工作区（进程内存，MVP 阶段）
@@ -302,6 +304,15 @@ async def write_related_work(
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
+
+
+def get_streamable_http_app():
+    """返回 Streamable HTTP ASGI 子应用，供 FastAPI mount 使用。
+    适用于：Claude Code、Gemini CLI 及所有支持 MCP Streamable HTTP 协议的客户端。
+    端点：/mcp/
+    """
+    return mcp.streamable_http_app()
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -17,7 +17,10 @@ cd backend
 uv sync --extra dev
 
 # Run development server
-uv run uvicorn app.main:app --reload
+# If uv is not in PATH, use .venv/bin/python directly:
+.venv/bin/python -m uvicorn app.main:app --reload
+# Alternatively with uv (requires uv in PATH):
+# uv run uvicorn app.main:app --reload
 
 # Run tests
 uv run pytest
@@ -59,12 +62,42 @@ npm run test:e2e
 ### Infrastructure
 
 ```bash
-# Start all services (PostgreSQL, Redis, Milvus, Elasticsearch, LangFuse)
+# Start all services (PostgreSQL, Redis, Elasticsearch, LangFuse)
 docker compose up -d
 
 # Start specific services
-docker compose up -d postgres redis milvus elasticsearch langfuse
+docker compose up -d postgres redis elasticsearch langfuse
 ```
+
+## MCP Server
+
+The MCP server is embedded in FastAPI via **Streamable HTTP transport**. It starts automatically with the backend — no separate process needed.
+
+**MCP endpoint**: `http://localhost:8000/mcp/`
+
+**How it works**: `mcp_server.py` defines 4 tools via `FastMCP`. In `main.py`, the lifespan explicitly calls `mcp.session_manager.run()` to initialize the task group (required because `app.mount()` does not trigger sub-app lifespans). The app is mounted at `/mcp`.
+
+**Claude Code configuration** — `.claude/settings.local.json` (project-level) or `~/.claude/settings.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "dases": {
+      "url": "http://localhost:8000/mcp/"
+    }
+  }
+}
+```
+
+The project already has `.claude/settings.local.json` configured with the correct URL and pre-approved tool permissions.
+
+**Available MCP tools**:
+- `start_search(query)` — Initialize session, returns disambiguation questions + `session_id`
+- `execute_search(session_id, answers?, search_mode?, size?, page?)` — Run search
+- `list_session_papers(session_id)` — List papers in current session
+- `write_related_work(session_id, topic, dblp_keys?, style?)` — Format papers for related work
+
+**Slash Command**: `/search_semantic_articles <query>` (defined in `.claude/commands/search_semantic_articles.md`)
 
 ## Architecture
 
@@ -129,7 +162,7 @@ This avoids CORS issues and keeps backend URLs out of client code.
 
 Backend requires `.env` file (copy from `backend/.env.example`):
 - `DATABASE_URL`, `REDIS_URL` for relational DB and cache
-- `VECTOR_DB_HOST/PORT` for Milvus
+- `ES_KNN_DIMS`, `ES_VECTOR_FIELD` for Elasticsearch kNN vector search
 - `LLM_API_KEY`, `LLM_MODEL` for LiteLLM integration
 - `ES_HOST` for Elasticsearch
 - `LANGFUSE_*` for observability
@@ -145,5 +178,4 @@ Frontend uses `.env.local` with `FASTAPI_URL=http://localhost:8000`.
 | LangFuse | 3001 |
 | PostgreSQL | 5432 |
 | Redis | 6379 |
-| Milvus | 19530 |
 | Elasticsearch | 9200 |

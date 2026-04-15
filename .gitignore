@@ -19,9 +19,10 @@ out/
 .env
 .env.local
 
-# --- IDE ---
+# --- IDE / AI工具 ---
 .vscode/
 .idea/
+.codex/
 *.swp
 *.swo
 

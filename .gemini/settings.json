@@ -1,11 +1,9 @@
 {
   "mcpServers": {
-    "dases-mcp": {
-      "command": "bash",
-      "args": [
-        "-c",
-        "cd backend && uv run python -m app.mcp_server"
-      ]
+    "dases": {
+      "httpUrl": "http://127.0.0.1:8000/mcp/",
+      "timeout": 30000,
+      "trust": false
     }
   }
 }
