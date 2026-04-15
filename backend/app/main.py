@@ -54,6 +54,7 @@ app.include_router(search.router, prefix="/api/v1/search", tags=["Search"])
 # --- MCP Server ---
 from app.mcp_server import get_streamable_http_app  # noqa: E402
 from app.mcp_auth import MCPAuthMiddleware  # noqa: E402
+from app.mcp_server import mcp as _mcp  # noqa: E402
 
 
 class _MCPHostMiddleware:
@@ -87,6 +88,9 @@ else:
 
 # Streamable HTTP transport（Claude Code / 支持新协议的客户端）
 app.mount("/mcp", mcp_app)
+
+# SSE transport（Gemini CLI 等使用旧协议的客户端）
+app.mount("/sse", _MCPHostMiddleware(_mcp.sse_app()))
 
 
 @app.get("/health")

@@ -10,10 +10,5 @@
       "mcp__dases__execute_search",
       "Bash(.venv/bin/python -c \"from mcp.server.fastmcp import FastMCP; help\\(FastMCP\\)\")"
     ]
-  },
-  "mcpServers": {
-    "dases": {
-      "url": "http://49.52.27.139:8000/mcp/"
-    }
   }
 }

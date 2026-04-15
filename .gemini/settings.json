@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "dases": {
-      "httpUrl": "http://127.0.0.1:8000/mcp/",
-      "timeout": 30000,
-      "trust": false
+    "dases-139": {
+      "url": "http://49.52.27.139:8000/sse/",
+      "type": "sse",
+      "trust": true
     }
   }
 }
