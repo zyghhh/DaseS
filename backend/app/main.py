@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.mcp_server import mcp
 from app.services.es_service import close_es_client, ensure_index
-# cd /mnt/d/vDesktop/DaseS/backend & uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# cd /mnt/d/vDesktop/DaseS/backend & uv run uvicorn app.main:application --reload --host 0.0.0.0 --port 8000
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,10 +89,45 @@ else:
 # Streamable HTTP transport（Claude Code / 支持新协议的客户端）
 app.mount("/mcp", mcp_app)
 
-# SSE transport（Gemini CLI 等使用旧协议的客户端）
-app.mount("/sse", _MCPHostMiddleware(_mcp.sse_app()))
-
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "version": settings.VERSION}
+
+
+# ---------------------------------------------------------------------------
+# SSE transport（Gemini CLI 等使用旧协议的客户端）
+# 将 SSE app 挂到根级，通过路径前缀过滤转发，避免与 FastAPI 路由冲突。
+# SSE app 实际占用的两条路径：
+#   GET  /sse       — SSE 长连接流
+#   POST /messages  — 客户端→服务端消息
+# ---------------------------------------------------------------------------
+
+_SSE_PATH_PREFIXES = ("/sse", "/messages")
+
+
+class _SSEPathRouter:
+    """根级 ASGI 路由器。
+
+    请求路径匹配 _SSE_PATH_PREFIXES 时转发给 SSE ASGI 子应用；
+    其余请求照常交给 FastAPI 处理，保持现有路由不受影响。
+    """
+
+    __slots__ = ("_fastapi", "_sse")
+
+    def __init__(self, fastapi_app, sse_asgi_app) -> None:
+        self._fastapi = fastapi_app
+        self._sse = sse_asgi_app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            path: str = scope.get("path", "")
+            first_seg = "/" + path.lstrip("/").split("/")[0]
+            if first_seg in _SSE_PATH_PREFIXES:
+                await self._sse(scope, receive, send)
+                return
+        await self._fastapi(scope, receive, send)
+
+
+# 对外暴露的 ASGI 入口（uvicorn app.main:application）
+application = _SSEPathRouter(app, _MCPHostMiddleware(_mcp.sse_app()))

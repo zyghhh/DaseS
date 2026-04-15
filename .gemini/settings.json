@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "dases-139": {
-      "url": "http://49.52.27.139:8000/sse/",
+      "url": "http://49.52.27.139:8000/sse/sse",
       "type": "sse",
       "trust": true
     }
