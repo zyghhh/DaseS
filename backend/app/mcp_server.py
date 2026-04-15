@@ -18,23 +18,13 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.services.es_service import clarify_search, search_papers
 
 # streamable_http_path="/" 使得挂载到 /mcp 后，端点路径为 /mcp/
+# 关闭 DNS rebinding 保护，允许远程 IP 访问 MCP 端点
 mcp = FastMCP(
     "DaseS",
     streamable_http_path="/",
     host="0.0.0.0",
     transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "localhost", "localhost:*",
-            "127.0.0.1", "127.0.0.1:*",
-            "[::1]", "[::1]:*",
-            "49.52.27.139", "49.52.27.139:*",
-        ],
-        allowed_origins=[
-            "http://localhost:*",
-            "http://127.0.0.1:*",
-            "http://49.52.27.139:*",
-        ],
+        enable_dns_rebinding_protection=False,
     ),
 )
 
