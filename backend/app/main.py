@@ -55,11 +55,35 @@ app.include_router(search.router, prefix="/api/v1/search", tags=["Search"])
 from app.mcp_server import get_streamable_http_app  # noqa: E402
 from app.mcp_auth import MCPAuthMiddleware  # noqa: E402
 
+
+class _MCPHostMiddleware:
+    """MCP 安全修復中间件。
+
+    mcp SDK ≥ 1.26 引入 DNS rebinding 防护，但存在 "late host binding" bug：
+    FastMCP() 的 transport_security 参数没有正确传入安全检查层，
+    导致 enable_dns_rebinding_protection=False 无效，远程 IP 访问就返回 421。
+    修復方案：在请求进入 MCP ASGI 子应用前，将 Host 头改写为 localhost。
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            scope = {
+                **scope,
+                "headers": [
+                    (b"host", b"localhost") if k.lower() == b"host" else (k, v)
+                    for k, v in scope.get("headers", [])
+                ],
+            }
+        await self.app(scope, receive, send)
+
+
 if settings.MCP_AUTH_ENABLED:
-    # 认证模式：MCP 子应用包裹在认证中间件内
-    mcp_app = MCPAuthMiddleware(get_streamable_http_app())
+    mcp_app = MCPAuthMiddleware(_MCPHostMiddleware(get_streamable_http_app()))
 else:
-    mcp_app = get_streamable_http_app()
+    mcp_app = _MCPHostMiddleware(get_streamable_http_app())
 
 # Streamable HTTP transport（Claude Code / 支持新协议的客户端）
 app.mount("/mcp", mcp_app)
