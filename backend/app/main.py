@@ -11,8 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.mcp_server import mcp
 from app.services.es_service import close_es_client, ensure_index
-# cd /mnt/d/vDesktop/DaseS/backend
-#.venv/bin/python -m uvicorn app.main:app --reload --port 8000
+# cd /mnt/d/vDesktop/DaseS/backend & uv run uvicorn app.main:app --reload --port 8000
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

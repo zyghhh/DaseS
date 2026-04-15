@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "dases"
 version = "0.1.0"
 description = "基于计算机科学领域学术论文的多智能体检索系统"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     # --- Web 框架 ---
     "fastapi>=0.115",
@@ -16,6 +16,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.30",
     "alembic>=1.14",
+    "greenlet>=2.0.2,<3.2",   # 显式锁定：确保拿到含 cp311 wheel 的版本，避免源码编译失败
     # --- Redis ---
     "redis>=5.0",
     # --- LLM / Agent ---
@@ -25,12 +26,12 @@ dependencies = [
     # --- 向量检索（通过 Elasticsearch kNN 实现，暂无独立向量库依赖）---
     # "pymilvus>=2.4",          # 预留：后续若切换独立向量库再启用
     # "qdrant-client>=1.12",    # 备选
-    # --- Embedding ---
-    "sentence-transformers>=3.0",
-    "torch>=2.0,<2.11",  # CPU-only, source overridden via [tool.uv.sources]
-    # --- 文档解析 ---
-    "pymupdf>=1.24",
-    "unstructured>=0.15",
+    # --- Embedding（暂未实现，依赖预留注释，待向量检索功能开发时启用）---
+    # "sentence-transformers>=3.0",
+    # "torch>=2.0,<2.11",  # CPU-only, source overridden via [tool.uv.sources]
+    # --- 文档解析（暂未实现，parser.py 全是 TODO，待 RAG 功能开发时启用）---
+    # "pymupdf>=1.24",        # 新版无 manylinux_2_17 wheel，CentOS 7 上源码编译失败
+    # "unstructured>=0.15",   # 拉入 numpy 2.x，同样会在老平台编译失败
     # --- 可观测性 ---
     "langfuse>=2.50",
     # --- Elasticsearch ---
@@ -42,6 +43,9 @@ dependencies = [
     "rank-bm25>=0.2",
     "lxml>=5.0",
     "pdfplumber>=0.11.9",
+    # --- 间接依赖版本锁定（CentOS 7 / manylinux_2_17 老平台兼容）---
+    "tiktoken>=0.7,<0.9",    # 0.9+ 仅有 manylinux_2_28 wheel
+    # "numpy>=1.24,<2.0",    # unstructured 已注释，暂不需要锁定；启用 unstructured 时再追加
 ]
 
 [project.optional-dependencies]

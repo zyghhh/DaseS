@@ -13,7 +13,7 @@
   },
   "mcpServers": {
     "dases": {
-      "url": "http://localhost:8000/mcp/"
+      "url": "http://49.52.27.139:8000/mcp/"
     }
   }
 }

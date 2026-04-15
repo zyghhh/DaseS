@@ -17,7 +17,12 @@ from mcp.server.fastmcp import FastMCP
 from app.services.es_service import clarify_search, search_papers
 
 # streamable_http_path="/" 使得挂载到 /mcp 后，端点路径为 /mcp/
-mcp = FastMCP("DaseS", streamable_http_path="/")
+mcp = FastMCP(
+    "DaseS",
+    streamable_http_path="/",
+    host="0.0.0.0",
+    allowed_hosts=["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "49.52.27.139", "49.52.27.139:*"],
+)
 
 # ---------------------------------------------------------------------------
 # 会话级工作区（进程内存，MVP 阶段）
