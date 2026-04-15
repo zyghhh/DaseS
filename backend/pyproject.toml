@@ -27,7 +27,7 @@ dependencies = [
     # "qdrant-client>=1.12",    # 备选
     # --- Embedding ---
     "sentence-transformers>=3.0",
-    "torch>=2.0",  # CPU-only, source overridden via [tool.uv.sources]
+    "torch>=2.0,<2.11",  # CPU-only, source overridden via [tool.uv.sources]
     # --- 文档解析 ---
     "pymupdf>=1.24",
     "unstructured>=0.15",
