@@ -13,6 +13,7 @@ import time
 import uuid
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from app.services.es_service import clarify_search, search_papers
 
@@ -21,7 +22,20 @@ mcp = FastMCP(
     "DaseS",
     streamable_http_path="/",
     host="0.0.0.0",
-    allowed_hosts=["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "49.52.27.139", "49.52.27.139:*"],
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "localhost", "localhost:*",
+            "127.0.0.1", "127.0.0.1:*",
+            "[::1]", "[::1]:*",
+            "49.52.27.139", "49.52.27.139:*",
+        ],
+        allowed_origins=[
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "http://49.52.27.139:*",
+        ],
+    ),
 )
 
 # ---------------------------------------------------------------------------
