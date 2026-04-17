@@ -353,18 +353,26 @@ async def clarify_search(query: str) -> dict:
     Returns:
         dict: 包含 total_hits 和 questions 列表。
     """
+    from datetime import datetime
+
     es = get_es_client()
     index = settings.ES_ALIAS_PAPERS
 
-    # 先用 multi_match 搜索，同时做 aggregation
+    # 先用 multi_match 搜索（title + abstract），同时做 aggregation
     resp = await es.search(
         index=index,
-        query={"multi_match": {"query": query, "fields": ["title^3", "title.raw"], "type": "best_fields"}},
+        query={
+            "multi_match": {
+                "query": query,
+                "fields": ["title^3", "title.raw", "abstract^1"],
+                "type": "best_fields",
+            }
+        },
         size=0,
         aggregations={
             "top_venues": {"terms": {"field": "venue", "size": 8, "min_doc_count": 5}},
             "year_histogram": {
-                "histogram": {"field": "year", "interval": 5, "order": {"_key": "desc"}},
+                "histogram": {"field": "year", "interval": 2, "order": {"_key": "desc"}},
             },
             "ccf_distribution": {"terms": {"field": "ccf_rating", "size": 4}},
         },
@@ -387,21 +395,35 @@ async def clarify_search(query: str) -> dict:
             "options": options,
         })
 
-    # 问题 2：时间范围
+    # 问题 2：时间范围（按 2 年粒度动态统计，取有数据的时间段）
     year_buckets = aggs.get("year_histogram", {}).get("buckets", [])
-    if year_buckets:
-        recent = sum(b["doc_count"] for b in year_buckets if b["key"] >= 2020)
-        older = total - recent
-        if recent > 0 and older > 0:
-            questions.append({
-                "id": "time_range",
-                "question": "您关注哪个时间段？",
-                "options": [
-                    {"label": "近5年（2020至今）", "count": recent, "value": {"year_from": 2020}},
-                    {"label": "较早（2020以前）", "count": older, "value": {"year_to": 2019}},
-                    {"label": "不限", "count": total, "value": {}, "skip": True},
-                ],
+    # 过滤掉无数据的桶，按年份降序排列
+    year_buckets = [b for b in year_buckets if b["doc_count"] > 0]
+    year_buckets.sort(key=lambda b: b["key"], reverse=True)
+    if len(year_buckets) > 1:
+        current_year = datetime.now().year
+        time_options: list[dict] = []
+        for b in year_buckets:
+            start = int(b["key"])
+            # interval=2，区间为 [start, start+1]
+            end = start + 1
+            # 最新桶的结束年份不超过当前年份
+            end = min(end, current_year)
+            if start == end:
+                label = str(start)
+            else:
+                label = f"{start}–{end}"
+            time_options.append({
+                "label": label,
+                "count": b["doc_count"],
+                "value": {"year_from": start, "year_to": end},
             })
+        time_options.append({"label": "不限", "count": total, "value": {}, "skip": True})
+        questions.append({
+            "id": "time_range",
+            "question": "您关注哪个时间段的研究？",
+            "options": time_options,
+        })
 
     # 问题 3：CCF 评级
     ccf_buckets = aggs.get("ccf_distribution", {}).get("buckets", [])
